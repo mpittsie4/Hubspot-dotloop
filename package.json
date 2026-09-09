@@ -1,0 +1,41 @@
+{
+  "name": "hubspot-dotloop-connector",
+  "version": "1.0.0",
+  "description": "Two-way sync connector between HubSpot CRM and Dotloop (contacts <-> loop participants/contacts, deals <-> loops)",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "migrate": "tsx src/db/migrate.ts",
+    "register:dotloop-subscriptions": "tsx scripts/registerDotloopSubscriptions.ts",
+    "register:hubspot-webhooks": "tsx scripts/registerHubspotWebhooks.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "node-cron": "^3.0.3",
+    "pg": "^8.13.0",
+    "pino": "^9.4.0",
+    "pino-http": "^10.3.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.16.10",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.11.10",
+    "pino-pretty": "^11.2.2",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.1"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  }
+}

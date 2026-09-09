@@ -1,0 +1,58 @@
+# Render Blueprint — provisions the web service AND a managed Postgres
+# database together from a single "New Blueprint" / "Deploy to Render"
+# click. See README.md "One-click deploy" section for the exact flow.
+#
+# Everything marked `sync: false` is a secret Render will prompt you for
+# in its dashboard during setup rather than storing in this file — those
+# are the HubSpot/Dotloop app credentials only you have.
+databases:
+  - name: hubspot-dotloop-connector-db
+    databaseName: connector
+    user: connector
+    plan: starter
+
+services:
+  - type: web
+    name: hubspot-dotloop-connector
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hubspot-dotloop-connector-db
+          property: connectionString
+      # RENDER_EXTERNAL_URL is injected by Render automatically and is what
+      # src/config.ts uses to build OAuth redirect URIs and webhook target
+      # URLs — no PUBLIC_BASE_URL to set by hand. If you ever front this
+      # with your own domain instead, set PUBLIC_BASE_URL to override it.
+      - key: HUBSPOT_CLIENT_ID
+        sync: false
+      - key: HUBSPOT_CLIENT_SECRET
+        sync: false
+      - key: HUBSPOT_APP_ID
+        sync: false
+      - key: HUBSPOT_SCOPES
+        value: crm.objects.contacts.read,crm.objects.contacts.write,crm.objects.deals.read,crm.objects.deals.write,webhooks
+      - key: HUBSPOT_WEBHOOK_SIGNING_SECRET
+        sync: false
+      - key: DOTLOOP_CLIENT_ID
+        sync: false
+      - key: DOTLOOP_CLIENT_SECRET
+        sync: false
+      - key: DOTLOOP_DEFAULT_PROFILE_ID
+        sync: false
+      - key: DOTLOOP_WEBHOOK_SIGNING_SECRET
+        sync: false
+      - key: RECONCILE_INTERVAL_MINUTES
+        value: 15
+      - key: RECONCILE_INITIAL_LOOKBACK_MINUTES
+        value: 1440
+      - key: LOG_LEVEL
+        value: info

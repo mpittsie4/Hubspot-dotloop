@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: connector
+      POSTGRES_PASSWORD: connector
+      POSTGRES_DB: connector
+    ports:
+      - "5432:5432"
+    volumes:
+      - connector_db_data:/var/lib/postgresql/data
+
+  connector:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - db
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://connector:connector@db:5432/connector
+
+volumes:
+  connector_db_data:
