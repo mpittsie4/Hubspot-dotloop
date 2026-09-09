@@ -16,7 +16,7 @@ services:
     name: hubspot-dotloop-connector
     runtime: node
     plan: starter
-    buildCommand: npm install; echo ---BIN---; ls node_modules/.bin | grep -i tsc; echo ---TYPES---; ls node_modules/@types; echo ---TSPKG---; ls node_modules | grep -i typescript; npm run build
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /health
     envVars:
