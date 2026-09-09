@@ -39,7 +39,7 @@ services:
       - key: HUBSPOT_APP_ID
         sync: false
       - key: HUBSPOT_SCOPES
-        value: crm.objects.contacts.read,crm.objects.contacts.write,crm.objects.deals.read,crm.objects.deals.write,webhooks
+        value: oauth,crm.objects.contacts.read,crm.objects.contacts.write,crm.schemas.deals.read,crm.objects.deals.read,crm.objects.deals.write
       - key: HUBSPOT_WEBHOOK_SIGNING_SECRET
         sync: false
       - key: DOTLOOP_CLIENT_ID
