@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "description": "Two-way sync connector between HubSpot CRM and Dotloop (contacts <-> loop participants/contacts, deals <-> loops)",
   "private": true,
-  "main": "dist/index.js",
+  "main": "dist/src/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/db/migrate.ts",
     "register:dotloop-subscriptions": "tsx scripts/registerDotloopSubscriptions.ts",
