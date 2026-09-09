@@ -9,7 +9,7 @@ databases:
   - name: hubspot-dotloop-connector-db
     databaseName: connector
     user: connector
-    plan: starter
+    plan: basic-256mb
 
 services:
   - type: web
