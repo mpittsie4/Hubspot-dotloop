@@ -75,6 +75,16 @@ export class HubSpotClient {
     return this.accountKey;
   }
 
+  // ---- Pipelines (used by the app's Settings UI extension, via the
+  // hubspotProxyRoutes backend proxy — see that file for why this can't
+  // be called directly from a "settings" type UI extension with
+  // hubspot.fetch()) --------------------------------------------------
+
+  async listDealPipelines(): Promise<{ results: Array<{ label: string; stages: Array<{ id: string; label: string }> }> }> {
+    const res = await this.http.get(`/crm/v3/pipelines/deals`);
+    return res.data;
+  }
+
   // ---- Contacts -----------------------------------------------------
 
   async getContact(id: string, properties: string[]): Promise<HubSpotObject<HubSpotContactProperties> | null> {

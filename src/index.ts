@@ -6,6 +6,7 @@ import { logger } from "./utils/logger";
 import { authRouter } from "./routes/authRoutes";
 import { healthRouter } from "./routes/healthRoutes";
 import { hubspotWebhookRouter } from "./webhooks/hubspotWebhook";
+import { hubspotProxyRouter } from "./routes/hubspotProxyRoutes";
 import { dotloopWebhookRouter } from "./webhooks/dotloopWebhook";
 import { scheduleReconciliation } from "./sync/reconcile";
 import { migrate } from "./db/migrate";
@@ -29,6 +30,7 @@ app.use(
 app.use("/auth", authRouter);
 app.use("/health", healthRouter);
 app.use("/webhooks/hubspot", hubspotWebhookRouter);
+app.use("/api/hubspot", hubspotProxyRouter);
 app.use("/webhooks/dotloop", dotloopWebhookRouter);
 
 app.get("/", (_req, res) => {
