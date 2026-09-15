@@ -34,6 +34,94 @@ export interface HubSpotObject<P> {
   archived?: boolean;
 }
 
+export interface HubSpotPropertyDefinition {
+  name: string;
+  label: string;
+  type: "string" | "enumeration" | "datetime" | "number" | "bool";
+  fieldType: "text" | "select" | "date" | "number" | "booleancheckbox";
+  groupName: string;
+  description?: string;
+  options?: Array<{ label: string; value: string }>;
+}
+
+// Mirrors scripts/create-dotloop-properties.mjs — kept in sync by hand.
+// These are created automatically on every HubSpot connect via
+// ensureDotloopProperties(); the standalone script remains only as a
+// manual fallback (e.g. to backfill a portal connected before this existed).
+const DOTLOOP_DEAL_PROPERTIES: HubSpotPropertyDefinition[] = [
+  {
+    name: "dotloop_loop_id",
+    label: "Dotloop Loop ID",
+    type: "string",
+    fieldType: "text",
+    groupName: "dealinformation",
+    description: "The Dotloop loop ID this deal is linked to.",
+  },
+  {
+    name: "dotloop_loop_url",
+    label: "Dotloop Loop URL",
+    type: "string",
+    fieldType: "text",
+    groupName: "dealinformation",
+    description: "Direct link to the loop in Dotloop.",
+  },
+  {
+    name: "dotloop_sync_status",
+    label: "Dotloop Sync Status",
+    type: "enumeration",
+    fieldType: "select",
+    groupName: "dealinformation",
+    description: "Result of the most recent sync attempt with Dotloop.",
+    options: [
+      { label: "Success", value: "SUCCESS" },
+      { label: "Error", value: "ERROR" },
+      { label: "Skipped", value: "SKIPPED" },
+      { label: "Pending", value: "PENDING" },
+    ],
+  },
+  {
+    name: "dotloop_last_synced_at",
+    label: "Dotloop Last Synced At",
+    type: "datetime",
+    fieldType: "date",
+    groupName: "dealinformation",
+    description: "Timestamp of the most recent sync attempt with Dotloop.",
+  },
+];
+
+const DOTLOOP_CONTACT_PROPERTIES: HubSpotPropertyDefinition[] = [
+  {
+    name: "dotloop_contact_id",
+    label: "Dotloop Contact ID",
+    type: "string",
+    fieldType: "text",
+    groupName: "contactinformation",
+    description: "The Dotloop loop-contact ID this contact is linked to.",
+  },
+  {
+    name: "dotloop_sync_status",
+    label: "Dotloop Sync Status",
+    type: "enumeration",
+    fieldType: "select",
+    groupName: "contactinformation",
+    description: "Result of the most recent sync attempt with Dotloop.",
+    options: [
+      { label: "Success", value: "SUCCESS" },
+      { label: "Error", value: "ERROR" },
+      { label: "Skipped", value: "SKIPPED" },
+      { label: "Pending", value: "PENDING" },
+    ],
+  },
+  {
+    name: "dotloop_last_synced_at",
+    label: "Dotloop Last Synced At",
+    type: "datetime",
+    fieldType: "date",
+    groupName: "contactinformation",
+    description: "Timestamp of the most recent sync attempt with Dotloop.",
+  },
+];
+
 /**
  * Thin wrapper around the HubSpot CRM v3 API that transparently refreshes
  * the access token when it's near expiry. Assumes a single connected
@@ -69,6 +157,17 @@ export class HubSpotClient {
     }
 
     return new HubSpotClient(stored.accountKey, accessToken);
+  }
+
+  /**
+   * Builds a client directly from an access token you already have on hand
+   * (e.g. immediately after an OAuth callback, before/without a DB round
+   * trip). Bypasses getSoleToken, so this is also the entry point a
+   * future multi-tenant lookup (by portal id) would use instead of
+   * `create()`.
+   */
+  static forToken(accountKey: string, accessToken: string): HubSpotClient {
+    return new HubSpotClient(accountKey, accessToken);
   }
 
   get portalId() {
@@ -157,25 +256,42 @@ export class HubSpotClient {
     return this.searchByLastModified("deals", since, properties);
   }
 
-  // ---- Custom properties (used to store the Dotloop id on the record) -
+  // ---- Custom properties (used to store Dotloop sync state on the record) -
 
-  /** Idempotently ensures a custom property exists on an object type. */
-  async ensureProperty(objectType: "contacts" | "deals", name: string, label: string) {
+  /**
+   * Idempotently ensures a custom property exists on an object type,
+   * from a full property definition (type/fieldType/options, not just a
+   * text field). Safe to call repeatedly — an existing property is left
+   * untouched, not overwritten.
+   */
+  async ensureProperty(objectType: "contacts" | "deals", property: HubSpotPropertyDefinition) {
     try {
-      await this.http.get(`/crm/v3/properties/${objectType}/${name}`);
+      await this.http.get(`/crm/v3/properties/${objectType}/${property.name}`);
     } catch (err) {
       if (axios.isAxiosError(err) && err.response?.status === 404) {
-        await this.http.post(`/crm/v3/properties/${objectType}`, {
-          name,
-          label,
-          type: "string",
-          fieldType: "text",
-          groupName: objectType === "contacts" ? "contactinformation" : "dealinformation",
-        });
-        logger.info({ objectType, name }, "Created HubSpot custom property");
+        await this.http.post(`/crm/v3/properties/${objectType}`, property);
+        logger.info({ objectType, name: property.name }, "Created HubSpot custom property");
       } else {
         throw err;
       }
+    }
+  }
+
+  /**
+   * Creates (idempotently) the full set of dotloop_* deal and contact
+   * properties the connector and the Deal Sync Status card rely on. Call
+   * this right after an install connects HubSpot (see hubspotOAuth.ts) so
+   * every portal gets these automatically — this is what
+   * scripts/create-dotloop-properties.mjs used to require a manually
+   * created private-app token for, which doesn't scale past a single
+   * portal you administer yourself.
+   */
+  async ensureDotloopProperties(): Promise<void> {
+    for (const property of DOTLOOP_DEAL_PROPERTIES) {
+      await this.ensureProperty("deals", property);
+    }
+    for (const property of DOTLOOP_CONTACT_PROPERTIES) {
+      await this.ensureProperty("contacts", property);
     }
   }
 

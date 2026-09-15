@@ -2,6 +2,7 @@ import { Router } from "express";
 import crypto from "node:crypto";
 import { buildHubSpotAuthorizeUrl, handleHubSpotCallback } from "../auth/hubspotOAuth";
 import { buildDotloopAuthorizeUrl, handleDotloopCallback } from "../auth/dotloopOAuth";
+import { HubSpotClient } from "../clients/hubspotClient";
 import { logger } from "../utils/logger";
 
 export const authRouter = Router();
@@ -25,7 +26,22 @@ authRouter.get("/hubspot/callback", async (req, res) => {
     return res.status(400).send("Missing authorization code.");
   }
   try {
-    const { portalId } = await handleHubSpotCallback(code);
+    const { portalId, accessToken } = await handleHubSpotCallback(code);
+
+    // One-time per-install setup: make sure this portal has the dotloop_*
+    // custom properties the connector and the Deal Sync Status card need.
+    // Runs on the fresh OAuth token itself (which already has the
+    // crm.schemas.deals.write / crm.schemas.contacts.write scopes), so no
+    // manually-created private-app token is needed — this is what
+    // scripts/create-dotloop-properties.mjs used to require per portal.
+    // Non-fatal: the HubSpot connection still succeeds even if this fails
+    // (e.g. a scope got misconfigured), it just needs a manual retry.
+    try {
+      await HubSpotClient.forToken(portalId, accessToken).ensureDotloopProperties();
+    } catch (propErr) {
+      logger.error({ err: propErr, portalId }, "Failed to auto-create dotloop_* properties for this portal");
+    }
+
     res.send(`HubSpot connected (portal ${portalId}). You can close this tab.`);
   } catch (err) {
     logger.error({ err }, "HubSpot OAuth callback failed");

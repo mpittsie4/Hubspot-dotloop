@@ -28,8 +28,14 @@ async function exchange(body: Record<string, string>): Promise<HubSpotTokenRespo
   return res.data;
 }
 
-/** Exchanges an authorization code for tokens and persists them, keyed by portal (hub) id. */
-export async function handleHubSpotCallback(code: string): Promise<{ portalId: string }> {
+/**
+ * Exchanges an authorization code for tokens and persists them, keyed by
+ * portal (hub) id. Also returns the fresh access token itself so the
+ * caller (see authRoutes.ts) can immediately do one-time, per-install
+ * setup — e.g. creating the dotloop_* custom properties — without a
+ * separate DB round trip or a manually-created private-app token.
+ */
+export async function handleHubSpotCallback(code: string): Promise<{ portalId: string; accessToken: string }> {
   const token = await exchange({
     grant_type: "authorization_code",
     client_id: config.hubspot.clientId,
@@ -50,7 +56,7 @@ export async function handleHubSpotCallback(code: string): Promise<{ portalId: s
   });
 
   logger.info({ portalId }, "HubSpot account connected");
-  return { portalId };
+  return { portalId, accessToken: token.access_token };
 }
 
 export async function refreshHubSpotToken(refreshToken: string): Promise<HubSpotTokenResponse> {
