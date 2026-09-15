@@ -38,11 +38,14 @@ export function verifyHubSpotSignature(params: {
 
 /**
  * Verifies a Dotloop subscription webhook event, signed with HMAC-SHA1 over
- * the raw request body and sent in `X-DOTLOOP-SIGNATURE`, with
- * `X-DOTLOOP-TIMESTAMP` as a freshness check. Dotloop's docs don't publish
- * an exact max-age; we default to 5 minutes to match HubSpot's convention
- * and reject obviously-replayed events. Adjust if Dotloop's docs specify
- * otherwise for your subscription.
+ * `${timestamp}.${rawBody}` (timestamp and raw request body joined with a
+ * literal dot -- NOT the raw body alone; see
+ * https://dotloop.github.io/public-api/ webhook signature docs), sent in
+ * the `X-Dotloop-Webhook-Signature` header with `X-Dotloop-Webhook-Timestamp`
+ * (Unix seconds) as a freshness check. Dotloop's docs don't publish an exact
+ * max-age; we default to 5 minutes to match HubSpot's convention and reject
+ * obviously-replayed events. Adjust if Dotloop's docs specify otherwise for
+ * your subscription.
  */
 export function verifyDotloopSignature(params: {
   rawBody: string;
@@ -59,7 +62,8 @@ export function verifyDotloopSignature(params: {
     return { valid: false, reason: "stale_or_invalid_timestamp" };
   }
 
-  const expected = crypto.createHmac("sha1", signingSecret).update(rawBody, "utf8").digest("hex");
+  const signedContent = `${timestamp}.${rawBody}`;
+  const expected = crypto.createHmac("sha1", signingSecret).update(signedContent, "utf8").digest("hex");
   const ok = timingSafeEqualStrings(expected, signature);
   return ok ? { valid: true } : { valid: false, reason: "signature_mismatch" };
 }
