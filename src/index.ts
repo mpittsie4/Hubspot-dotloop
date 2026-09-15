@@ -8,7 +8,7 @@ import { healthRouter } from "./routes/healthRoutes";
 import { hubspotWebhookRouter } from "./webhooks/hubspotWebhook";
 import { hubspotProxyRouter } from "./routes/hubspotProxyRoutes";
 import { dotloopWebhookRouter } from "./webhooks/dotloopWebhook";
-import { scheduleReconciliation } from "./sync/reconcile";
+import { backfillDotloopProfileIds, scheduleReconciliation } from "./sync/reconcile";
 import { migrate } from "./db/migrate";
 
 const app = express();
@@ -46,6 +46,12 @@ app.get("/", (_req, res) => {
 async function main() {
   await migrate();
   logger.info("Database schema up to date");
+
+  // Self-heal any tenant connected to Dotloop before dotloop_profile_id
+  // existed (e.g. tenant_default, seeded by migrations/002_tenants.sql) so
+  // its Dotloop webhooks are reachable immediately rather than waiting for
+  // the next reconciliation pass -- see sync/reconcile.ts.
+  await backfillDotloopProfileIds();
 
   app.listen(config.port, () => {
     logger.info({ port: config.port }, "hubspot-dotloop-connector listening");

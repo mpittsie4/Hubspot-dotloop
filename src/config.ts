@@ -30,6 +30,11 @@ export const config = {
   port: Number(process.env.PORT ?? 3000),
   publicBaseUrl,
   logLevel: process.env.LOG_LEVEL ?? "info",
+  // Shared secret for POST /auth/admin/tenants (see routes/authRoutes.ts).
+  // Unset by default -- that endpoint fails closed (401) rather than open
+  // when this isn't configured, so it's safe to leave unset until it's
+  // actually needed.
+  adminApiKey: process.env.ADMIN_API_KEY ?? "",
 
   hubspot: {
     clientId: required("HUBSPOT_CLIENT_ID"),

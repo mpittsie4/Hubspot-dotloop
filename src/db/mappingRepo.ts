@@ -5,6 +5,7 @@ import { EntityType, ObjectMappingRow, SyncOrigin } from "./types";
 function toRow(r: any): ObjectMappingRow {
   return {
     id: r.id,
+    tenantId: r.tenant_id,
     entityType: r.entity_type,
     hubspotId: r.hubspot_id,
     dotloopId: r.dotloop_id,
@@ -17,23 +18,36 @@ function toRow(r: any): ObjectMappingRow {
   };
 }
 
-export async function findMappingByHubspotId(entityType: EntityType, hubspotId: string): Promise<ObjectMappingRow | null> {
-  const res = await pool.query(`SELECT * FROM object_mappings WHERE entity_type = $1 AND hubspot_id = $2`, [
-    entityType,
-    hubspotId,
-  ]);
+// hubspot_id/dotloop_id are only unique *within* one tenant's portal/account
+// (see migrations/002_tenants.sql), so every lookup and write here is
+// scoped by tenantId.
+
+export async function findMappingByHubspotId(
+  tenantId: string,
+  entityType: EntityType,
+  hubspotId: string
+): Promise<ObjectMappingRow | null> {
+  const res = await pool.query(
+    `SELECT * FROM object_mappings WHERE tenant_id = $1 AND entity_type = $2 AND hubspot_id = $3`,
+    [tenantId, entityType, hubspotId]
+  );
   return res.rows[0] ? toRow(res.rows[0]) : null;
 }
 
-export async function findMappingByDotloopId(entityType: EntityType, dotloopId: string): Promise<ObjectMappingRow | null> {
-  const res = await pool.query(`SELECT * FROM object_mappings WHERE entity_type = $1 AND dotloop_id = $2`, [
-    entityType,
-    dotloopId,
-  ]);
+export async function findMappingByDotloopId(
+  tenantId: string,
+  entityType: EntityType,
+  dotloopId: string
+): Promise<ObjectMappingRow | null> {
+  const res = await pool.query(
+    `SELECT * FROM object_mappings WHERE tenant_id = $1 AND entity_type = $2 AND dotloop_id = $3`,
+    [tenantId, entityType, dotloopId]
+  );
   return res.rows[0] ? toRow(res.rows[0]) : null;
 }
 
 export interface CreateMappingInput {
+  tenantId: string;
   entityType: EntityType;
   hubspotId: string;
   dotloopId: string;
@@ -46,11 +60,12 @@ export interface CreateMappingInput {
 export async function createMapping(input: CreateMappingInput): Promise<ObjectMappingRow> {
   const res = await pool.query(
     `INSERT INTO object_mappings
-       (id, entity_type, hubspot_id, dotloop_id, dotloop_profile_id, last_synced_hash, last_synced_at, last_sync_origin, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+       (id, tenant_id, entity_type, hubspot_id, dotloop_id, dotloop_profile_id, last_synced_hash, last_synced_at, last_sync_origin, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
      RETURNING *`,
     [
       crypto.randomUUID(),
+      input.tenantId,
       input.entityType,
       input.hubspotId,
       input.dotloopId,

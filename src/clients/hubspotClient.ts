@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from "axios";
 import { Provider } from "../db/types";
 import { config } from "../config";
-import { getSoleToken, saveToken } from "../auth/tokenStore";
+import { getSoleToken, getToken, saveToken } from "../auth/tokenStore";
 import { refreshHubSpotToken } from "../auth/hubspotOAuth";
 import { logger } from "../utils/logger";
 
@@ -124,9 +124,12 @@ const DOTLOOP_CONTACT_PROPERTIES: HubSpotPropertyDefinition[] = [
 
 /**
  * Thin wrapper around the HubSpot CRM v3 API that transparently refreshes
- * the access token when it's near expiry. Assumes a single connected
- * HubSpot portal (see tokenStore.getSoleToken); pass accountKey explicitly
- * if you extend this to multiple portals.
+ * the access token when it's near expiry. Pass the tenant's HubSpot portal
+ * id as accountKey to operate as that tenant (see TenantRow.hubspotPortalId
+ * and the sync layer, which does this for every real sync call); omitting
+ * it falls back to tokenStore.getSoleToken for callers that predate
+ * multi-tenancy and still assume a single connected portal (e.g. the
+ * Settings-page proxy in routes/hubspotProxyRoutes.ts).
  */
 export class HubSpotClient {
   private http: AxiosInstance;
@@ -140,8 +143,11 @@ export class HubSpotClient {
     });
   }
 
-  static async create(): Promise<HubSpotClient> {
-    const stored = await getSoleToken(Provider.HUBSPOT);
+  static async create(accountKey?: string): Promise<HubSpotClient> {
+    const stored = accountKey ? await getToken(Provider.HUBSPOT, accountKey) : await getSoleToken(Provider.HUBSPOT);
+    if (!stored) {
+      throw new Error(`No connected HubSpot token found for portal ${accountKey}.`);
+    }
     const needsRefresh = stored.expiresAt.getTime() - Date.now() < 5 * 60 * 1000;
 
     let accessToken = stored.accessToken;
@@ -162,9 +168,9 @@ export class HubSpotClient {
   /**
    * Builds a client directly from an access token you already have on hand
    * (e.g. immediately after an OAuth callback, before/without a DB round
-   * trip). Bypasses getSoleToken, so this is also the entry point a
-   * future multi-tenant lookup (by portal id) would use instead of
-   * `create()`.
+   * trip). Bypasses getSoleToken/getToken entirely -- used by
+   * routes/authRoutes.ts right after a HubSpot connect, before the tenant
+   * row has even been updated with its portal id.
    */
   static forToken(accountKey: string, accessToken: string): HubSpotClient {
     return new HubSpotClient(accountKey, accessToken);

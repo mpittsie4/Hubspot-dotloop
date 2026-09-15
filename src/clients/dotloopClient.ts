@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from "axios";
 import { Provider } from "../db/types";
 import { config } from "../config";
-import { getSoleToken, saveToken } from "../auth/tokenStore";
+import { getSoleToken, getToken, saveToken } from "../auth/tokenStore";
 import { refreshDotloopToken } from "../auth/dotloopOAuth";
 import { logger } from "../utils/logger";
 
@@ -45,7 +45,14 @@ export interface DotloopParticipant {
   role?: string; // e.g. "BUYER", "SELLER", "BUYING_AGENT", ...
 }
 
-/** Thin wrapper around the Dotloop Public API v2 with transparent token refresh. */
+/**
+ * Thin wrapper around the Dotloop Public API v2 with transparent token
+ * refresh. Pass the tenant's Dotloop account id as accountKey to operate as
+ * that tenant (see TenantRow.dotloopAccountId and the sync layer, which
+ * does this for every real sync call); omitting it falls back to
+ * tokenStore.getSoleToken for callers that predate multi-tenancy and still
+ * assume a single connected account.
+ */
 export class DotloopClient {
   private http: AxiosInstance;
   private accountKey: string;
@@ -58,8 +65,11 @@ export class DotloopClient {
     });
   }
 
-  static async create(): Promise<DotloopClient> {
-    const stored = await getSoleToken(Provider.DOTLOOP);
+  static async create(accountKey?: string): Promise<DotloopClient> {
+    const stored = accountKey ? await getToken(Provider.DOTLOOP, accountKey) : await getSoleToken(Provider.DOTLOOP);
+    if (!stored) {
+      throw new Error(`No connected Dotloop token found for account ${accountKey}.`);
+    }
     const needsRefresh = stored.expiresAt.getTime() - Date.now() < 5 * 60 * 1000;
 
     let accessToken = stored.accessToken;

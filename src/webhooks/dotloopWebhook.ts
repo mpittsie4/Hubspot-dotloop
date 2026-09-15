@@ -2,6 +2,7 @@ import { Router } from "express";
 import { config } from "../config";
 import { verifyDotloopSignature } from "../utils/crypto";
 import { queueContactFromDotloop, queueLoopFromDotloop } from "../sync/syncEngine";
+import { getTenantByDotloopProfileId } from "../db/tenantRepo";
 import { logger } from "../utils/logger";
 
 interface DotloopWebhookEvent {
@@ -40,26 +41,42 @@ dotloopWebhookRouter.post("/", (req, res) => {
 
   res.status(200).send("ok");
 
-  const event = req.body as DotloopWebhookEvent;
+  void handleEvent(req.body as DotloopWebhookEvent);
+});
+
+/**
+ * Dotloop events carry a profileId, not an accountId (an account can have
+ * more than one profile), so tenant resolution looks up by cached profile
+ * id -- see db/tenantRepo.ts's getTenantByDotloopProfileId and
+ * sync/reconcile.ts's backfillDotloopProfileIds for tenants connected
+ * before that column existed.
+ */
+async function handleEvent(event: DotloopWebhookEvent) {
+  const tenant = await getTenantByDotloopProfileId(event.profileId);
+  if (!tenant) {
+    logger.warn({ profileId: event.profileId }, "Ignoring Dotloop webhook event for an unrecognized/unlinked profile");
+    return;
+  }
+
   switch (event.eventType) {
     case "LOOP_CREATED":
     case "LOOP_UPDATED":
-      void queueLoopFromDotloop(event.profileId, event.event.id);
+      void queueLoopFromDotloop(tenant, event.profileId, event.event.id);
       break;
     case "LOOP_PARTICIPANT_CREATED":
     case "LOOP_PARTICIPANT_UPDATED":
       // Participants roll up into the loop's synced state; re-sync the loop.
-      void queueLoopFromDotloop(event.profileId, event.event.id);
+      void queueLoopFromDotloop(tenant, event.profileId, event.event.id);
       break;
     case "CONTACT_CREATED":
     case "CONTACT_UPDATED":
-      void queueContactFromDotloop(event.event.id);
+      void queueContactFromDotloop(tenant, event.event.id);
       break;
     case "LOOP_MERGED":
       // The old loop id (fromId) is gone; re-point sync at the surviving one.
-      if (event.event.toId) void queueLoopFromDotloop(event.profileId, event.event.toId);
+      if (event.event.toId) void queueLoopFromDotloop(tenant, event.profileId, event.event.toId);
       break;
     default:
       logger.debug({ eventType: event.eventType }, "Ignoring unhandled Dotloop event type");
   }
-});
+}

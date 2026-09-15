@@ -2,6 +2,8 @@ import { Router } from "express";
 import { config } from "../config";
 import { verifyHubSpotSignature } from "../utils/crypto";
 import { queueContactFromHubSpot, queueDealFromHubSpot } from "../sync/syncEngine";
+import { getTenantByHubspotPortalId } from "../db/tenantRepo";
+import { TenantRow } from "../db/types";
 import { logger } from "../utils/logger";
 
 interface HubSpotWebhookEvent {
@@ -43,14 +45,37 @@ hubspotWebhookRouter.post("/", (req, res) => {
   res.status(200).send("ok");
 
   const events: HubSpotWebhookEvent[] = Array.isArray(req.body) ? req.body : [];
+  void handleEvents(events);
+});
+
+/**
+ * A single delivery batch can span multiple portals (HubSpot may batch
+ * several of this app's subscribers together), so tenant resolution
+ * happens per event -- cached within the batch to avoid a DB round trip
+ * per event when a batch is dominated by one portal.
+ */
+async function handleEvents(events: HubSpotWebhookEvent[]) {
+  const tenantCache = new Map<string, TenantRow | null>();
+
   for (const event of events) {
+    const portalId = String(event.portalId);
+    let tenant = tenantCache.get(portalId);
+    if (tenant === undefined) {
+      tenant = await getTenantByHubspotPortalId(portalId);
+      tenantCache.set(portalId, tenant);
+    }
+    if (!tenant) {
+      logger.warn({ portalId }, "Ignoring HubSpot webhook event for an unrecognized/unlinked portal");
+      continue;
+    }
+
     const objectId = String(event.objectId);
     if (event.subscriptionType?.startsWith("contact.")) {
-      void queueContactFromHubSpot(objectId);
+      void queueContactFromHubSpot(tenant, objectId);
     } else if (event.subscriptionType?.startsWith("deal.")) {
-      void queueDealFromHubSpot(objectId);
+      void queueDealFromHubSpot(tenant, objectId);
     } else {
       logger.debug({ subscriptionType: event.subscriptionType }, "Ignoring unhandled HubSpot event type");
     }
   }
-});
+}
