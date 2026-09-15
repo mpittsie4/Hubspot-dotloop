@@ -53,6 +53,18 @@ export interface DotloopParticipant {
  * tokenStore.getSoleToken for callers that predate multi-tenancy and still
  * assume a single connected account.
  */
+/**
+ * Dotloop's `updated_min` filter rejects a standard `Date#toISOString()`
+ * value ("date string invalid: Unparseable date") because it includes
+ * millisecond precision (e.g. "2026-09-15T14:45:00.323Z") -- Dotloop wants
+ * whole-second precision. Strips the fractional seconds before the
+ * trailing "Z" so listRecentContacts/listRecentLoops (and therefore
+ * reconcile.ts's periodic poll, for every tenant) don't 400 on every call.
+ */
+function toDotloopFilterDate(date: Date): string {
+  return date.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
 export class DotloopClient {
   private http: AxiosInstance;
   private accountKey: string;
@@ -135,7 +147,7 @@ export class DotloopClient {
 
   /** Contacts updated since `since`, for reconciliation polling. */
   async listRecentContacts(since: Date): Promise<DotloopContact[]> {
-    return this.paginate<DotloopContact>("/contact", { filter: `updated_min=${since.toISOString()}` });
+    return this.paginate<DotloopContact>("/contact", { filter: `updated_min=${toDotloopFilterDate(since)}` });
   }
 
   // ---- Loops --------------------------------------------------------------
@@ -162,7 +174,7 @@ export class DotloopClient {
 
   async listRecentLoops(profileId: string, since: Date): Promise<DotloopLoopSummary[]> {
     return this.paginate<DotloopLoopSummary>(`/profile/${profileId}/loop`, {
-      filter: `updated_min=${since.toISOString()}`,
+      filter: `updated_min=${toDotloopFilterDate(since)}`,
     });
   }
 
