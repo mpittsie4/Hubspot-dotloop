@@ -8,6 +8,8 @@ import {
   DEFAULT_TRANSACTION_TYPE,
   fromDotloopLoop,
   fromHubSpotDeal,
+  getPipelineById,
+  getPipelineForTransactionType,
   toDotloopLoopDetail,
   toDotloopLoopSummary,
   toHubSpotDealProperties,
@@ -71,10 +73,23 @@ export async function syncDealFromHubSpot(hubspotDealId: string) {
   // reliable "find by name" search, so unlike contacts we don't attempt
   // to auto-link an existing loop here — link manually via the mapping
   // table if you need to backfill history.)
+  // The loop's transactionType must match the deal's own pipeline (Renter
+  // -> LEASE_OFFER, Buyer -> PURCHASE_OFFER, Seller -> LISTING_FOR_SALE;
+  // see PIPELINES in dealLoopMapping.ts) rather than always defaulting to
+  // PURCHASE_OFFER, otherwise e.g. a Seller-pipeline deal would create a
+  // buy-side loop with the wrong status vocabulary.
+  const pipeline = getPipelineById(source.properties.pipeline);
+  const transactionType = pipeline?.transactionType ?? DEFAULT_TRANSACTION_TYPE;
+  if (!pipeline) {
+    logger.warn(
+      { hubspotDealId, pipeline: source.properties.pipeline },
+      "Deal's pipeline isn't in PIPELINES; falling back to DEFAULT_TRANSACTION_TYPE for the new loop"
+    );
+  }
   const profileId = await dotloop.resolveProfileId();
   const loop = await dotloop.createLoop(profileId, {
     name: canonical.name || `HubSpot Deal ${hubspotDealId}`,
-    transactionType: DEFAULT_TRANSACTION_TYPE,
+    transactionType,
     status: canonical.status || undefined,
   });
   await pushCanonicalToDotloop(dotloop, profileId, String(loop.id), canonical);
@@ -112,13 +127,39 @@ export async function syncLoopFromDotloop(profileId: string, loopId: string) {
       await logSync("DOTLOOP_TO_HUBSPOT", loopId, mapping.hubspotId, "SKIPPED", "no-op / echo");
       return;
     }
-    await hubspot.updateDeal(mapping.hubspotId, toHubSpotDealProperties(canonical));
+    // Which HubSpot stage a Dotloop status maps back to depends on which
+    // pipeline the deal is already in (see resolveStageForStatus in
+    // dealLoopMapping.ts) — fetch the deal's current pipeline/dealstage
+    // first rather than guessing, so a status shared across pipelines
+    // (e.g. "Under Contract") doesn't get resolved against the wrong one.
+    const existingDeal = await hubspot.getDeal(mapping.hubspotId, ["pipeline", "dealstage"]);
+    if (!existingDeal) {
+      logger.warn({ hubspotDealId: mapping.hubspotId }, "Mapped HubSpot deal not found (possibly deleted); skipping");
+      await logSync("DOTLOOP_TO_HUBSPOT", loopId, mapping.hubspotId, "SKIPPED", "mapped deal not found");
+      return;
+    }
+    await hubspot.updateDeal(
+      mapping.hubspotId,
+      toHubSpotDealProperties(canonical, {
+        pipelineId: existingDeal.properties.pipeline,
+        currentStageId: existingDeal.properties.dealstage,
+      })
+    );
     await updateMapping(mapping.id, { lastSyncedHash: hash, lastSyncedAt: new Date(), lastSyncOrigin: SyncOrigin.DOTLOOP });
     await logSync("DOTLOOP_TO_HUBSPOT", loopId, mapping.hubspotId, "SUCCESS");
     return;
   }
 
-  const deal = await hubspot.createDeal(toHubSpotDealProperties(canonical));
+  // No mapping: this is a brand-new loop, so there's no existing deal to
+  // read a pipeline from — derive it from the loop's own transactionType
+  // instead (see PIPELINES in dealLoopMapping.ts). If the transactionType
+  // isn't one we recognize (e.g. "Real Estate Other"), toHubSpotDealProperties
+  // logs a warning and leaves pipeline/dealstage unset, so the deal still
+  // gets created (in HubSpot's default pipeline) rather than being lost.
+  const pipeline = getPipelineForTransactionType(summary.transactionType);
+  const deal = await hubspot.createDeal(
+    toHubSpotDealProperties(canonical, { pipelineId: pipeline?.pipelineId })
+  );
   await createMapping({
     entityType: EntityType.DEAL_LOOP,
     hubspotId: deal.id,
