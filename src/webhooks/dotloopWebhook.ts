@@ -19,8 +19,8 @@ export const dotloopWebhookRouter = Router();
 // Dotloop requires a response within 5 seconds, so we verify synchronously
 // and respond before kicking off any sync work.
 dotloopWebhookRouter.post("/", (req, res) => {
-  const signature = req.header("X-DOTLOOP-SIGNATURE");
-  const timestamp = req.header("X-DOTLOOP-TIMESTAMP");
+  const signature = req.header("X-DOTLOOP-WEBHOOK-SIGNATURE");
+  const timestamp = req.header("X-DOTLOOP-WEBHOOK-TIMESTAMP");
   const rawBody: string = (req as any).rawBody ?? JSON.stringify(req.body);
 
   if (!signature || !timestamp) {
