@@ -20,11 +20,31 @@ import { DotloopLoopDetail, DotloopLoopSummary } from "../clients/dotloopClient"
 export const DEFAULT_TRANSACTION_TYPE = "PURCHASE_OFFER";
 
 export const STAGE_TO_STATUS: Record<string, string> = {
-  // "appointmentscheduled": "PRE_OFFER",
-  // "contractsent": "PRE_OFFER",
-  // "decisionmakerboughtin": "UNDER_CONTRACT",
-  // "closedwon": "SOLD",
-  // "closedlost": "ARCHIVED",
+  '3232443112': 'Pre-Offer', // Renter Pipeline · New Lead
+  '3232443113': 'Pre-Offer', // Renter Pipeline · Viewing
+  '3232443114': 'Under Contract', // Renter Pipeline · Security Deposit Paid
+  '3232443115': 'Leased', // Renter Pipeline · Closed Won
+  '3232443116': 'Terminated', // Renter Pipeline · Closed Lost
+  '3232431837': 'Pre-Offer', // Buyer Pipeline · Engaging
+  '3232431838': 'Pre-Offer', // Buyer Pipeline · Qualified
+  '3232431839': 'Pre-Offer', // Buyer Pipeline · Preview Properties
+  '3232431840': 'Pre-Offer', // Buyer Pipeline · Offer to Purchase
+  '3232431841': 'Pre-Offer', // Buyer Pipeline · Negotiations
+  '3232431842': 'Under Contract', // Buyer Pipeline · Accepted Offer
+  '3251013337': 'Under Contract', // Buyer Pipeline · Active Closing
+  '3251013338': 'Under Contract', // Buyer Pipeline · Closing Sceduled
+  '3232431843': 'Sold', // Buyer Pipeline · Closed Won
+  '3232431844': 'Terminated', // Buyer Pipeline · Closed Lost
+  '3232320228': 'Pre-Listing', // Seller Pipeline · Engaging
+  '3232320229': 'Pre-Listing', // Seller Pipeline · Qualified
+  '3232320230': 'Pre-Listing', // Seller Pipeline · Listing Agreement Signed
+  '3232320231': 'Active Listing', // Seller Pipeline · Listed in MLS
+  '3232320232': 'Active Listing', // Seller Pipeline · Offer Made
+  '3232320233': 'Under Contract', // Seller Pipeline · Offer Accepted
+  '3232320234': 'Under Contract', // Seller Pipeline · Active Closing
+  '3232320235': 'Under Contract', // Seller Pipeline · Closing Scheduled
+  '3232320236': 'Sold', // Seller Pipeline · Closed Won
+  '3232320237': 'Terminated', // Seller Pipeline · Closed Lost
 };
 
 export const STATUS_TO_STAGE: Record<string, string> = Object.fromEntries(
