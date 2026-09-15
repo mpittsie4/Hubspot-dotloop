@@ -90,16 +90,33 @@ export function getPipelineForTransactionType(
  *      (e.g. an unrecognized/new Dotloop status), returns undefined so
  *      the caller can leave dealstage untouched rather than guess.
  */
+/**
+ * Dotloop's REST API returns loop `status` as an enum-style string (e.g.
+ * "UNDER_CONTRACT"), confirmed live from a real GET /profile/{id}/loop/{id}
+ * response -- NOT the title-case display string shown in Dotloop's own UI
+ * dropdown ("Under Contract") that the vocabulary comment above and this
+ * tenant's seeded pipelinesConfig both use. Comparisons between an
+ * API-sourced status and a config-sourced status must go through this
+ * normalizer so "UNDER_CONTRACT" and "Under Contract" (and "under-contract",
+ * etc.) are recognized as the same status. Config values are left as
+ * title-case in storage/UI/outbound writes (Dotloop's create/update
+ * endpoints accept that format fine) -- only comparisons are normalized.
+ */
+function normalizeStatus(status: string): string {
+  return status.trim().toUpperCase().replace(/[\s-]+/g, "_");
+}
+
 export function resolveStageForStatus(
   pipeline: PipelineConfig,
   status: string,
   currentStageId?: string
 ): string | undefined {
+  const target = normalizeStatus(status);
   if (currentStageId) {
     const current = pipeline.stages.find((s) => s.id === currentStageId);
-    if (current && current.status === status) return current.id;
+    if (current && normalizeStatus(current.status) === target) return current.id;
   }
-  const candidates = pipeline.stages.filter((s) => s.status === status);
+  const candidates = pipeline.stages.filter((s) => normalizeStatus(s.status) === target);
   if (candidates.length === 0) return undefined;
   return candidates[candidates.length - 1].id;
 }
