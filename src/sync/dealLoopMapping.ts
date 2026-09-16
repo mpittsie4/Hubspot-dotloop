@@ -190,6 +190,34 @@ export function toHubSpotDealProperties(
   };
 }
 
+/**
+ * Properties to write back onto a HubSpot deal after a successful sync in
+ * either direction, so the app's "Dotloop Sync Status" CRM card (which
+ * reads dotloop_loop_id / dotloop_sync_status / dotloop_last_synced_at
+ * directly off the deal) reflects reality instead of permanently showing
+ * "Not synced to Dotloop yet". Previously dealLoopSync.ts never set these
+ * -- createDeal/updateDeal only ever received the fields from
+ * toHubSpotDealProperties -- so a sync could succeed completely (deal
+ * created/updated, mapping row written) and the card would still show
+ * "not synced" with no way to tell otherwise short of checking Render's
+ * logs or the mappings table directly.
+ *
+ * dotloop_last_synced_at is a HubSpot "datetime" (not "date") property, so
+ * it takes any millisecond epoch timestamp -- unlike "date" properties,
+ * it isn't restricted to midnight UTC.
+ */
+export function dotloopSyncStatusProperties(loop: {
+  id: string | number;
+  loopUrl?: string;
+}): Partial<HubSpotDealProperties> {
+  return {
+    dotloop_loop_id: String(loop.id),
+    dotloop_loop_url: loop.loopUrl,
+    dotloop_sync_status: "SUCCESS",
+    dotloop_last_synced_at: String(Date.now()),
+  };
+}
+
 export function fromDotloopLoop(summary: DotloopLoopSummary, detail: DotloopLoopDetail): CanonicalDeal {
   return {
     name: summary.name ?? "",

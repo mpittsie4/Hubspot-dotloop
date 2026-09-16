@@ -6,6 +6,7 @@ import { DotloopClient } from "../clients/dotloopClient";
 import {
   CanonicalDeal,
   DEFAULT_TRANSACTION_TYPE,
+  dotloopSyncStatusProperties,
   fromDotloopLoop,
   fromHubSpotDeal,
   getPipelineById,
@@ -69,6 +70,7 @@ export async function syncDealFromHubSpot(tenant: TenantRow, hubspotDealId: stri
     }
     const profileId = mapping.dotloopProfileId ?? (await dotloop.resolveProfileId());
     await pushCanonicalToDotloop(dotloop, profileId, mapping.dotloopId, canonical);
+    await hubspot.updateDeal(hubspotDealId, dotloopSyncStatusProperties({ id: mapping.dotloopId }));
     await updateMapping(mapping.id, { lastSyncedHash: hash, lastSyncedAt: new Date(), lastSyncOrigin: SyncOrigin.HUBSPOT });
     await logSync(tenant.id, "HUBSPOT_TO_DOTLOOP", hubspotDealId, mapping.dotloopId, "SUCCESS");
     return;
@@ -97,6 +99,7 @@ export async function syncDealFromHubSpot(tenant: TenantRow, hubspotDealId: stri
     status: canonical.status || undefined,
   });
   await pushCanonicalToDotloop(dotloop, profileId, String(loop.id), canonical);
+  await hubspot.updateDeal(hubspotDealId, dotloopSyncStatusProperties(loop));
 
   await createMapping({
     tenantId: tenant.id,
@@ -147,13 +150,13 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
       await logSync(tenant.id, "DOTLOOP_TO_HUBSPOT", loopId, mapping.hubspotId, "SKIPPED", "mapped deal not found");
       return;
     }
-    await hubspot.updateDeal(
-      mapping.hubspotId,
-      toHubSpotDealProperties(tenant.pipelinesConfig, canonical, {
+    await hubspot.updateDeal(mapping.hubspotId, {
+      ...toHubSpotDealProperties(tenant.pipelinesConfig, canonical, {
         pipelineId: existingDeal.properties.pipeline,
         currentStageId: existingDeal.properties.dealstage,
-      })
-    );
+      }),
+      ...dotloopSyncStatusProperties(summary),
+    });
     await updateMapping(mapping.id, { lastSyncedHash: hash, lastSyncedAt: new Date(), lastSyncOrigin: SyncOrigin.DOTLOOP });
     await logSync(tenant.id, "DOTLOOP_TO_HUBSPOT", loopId, mapping.hubspotId, "SUCCESS");
     return;
@@ -166,9 +169,10 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
   // logs a warning and leaves pipeline/dealstage unset, so the deal still
   // gets created (in HubSpot's default pipeline) rather than being lost.
   const pipeline = getPipelineForTransactionType(tenant.pipelinesConfig, summary.transactionType);
-  const deal = await hubspot.createDeal(
-    toHubSpotDealProperties(tenant.pipelinesConfig, canonical, { pipelineId: pipeline?.pipelineId })
-  );
+  const deal = await hubspot.createDeal({
+    ...toHubSpotDealProperties(tenant.pipelinesConfig, canonical, { pipelineId: pipeline?.pipelineId }),
+    ...dotloopSyncStatusProperties(summary),
+  });
   await createMapping({
     tenantId: tenant.id,
     entityType: EntityType.DEAL_LOOP,
