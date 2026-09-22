@@ -262,6 +262,22 @@ export class HubSpotClient {
     return this.searchByLastModified("deals", since, properties);
   }
 
+  // ---- Notes (used by sync/documentSync.ts to surface new/updated Dotloop
+  // documents on the deal timeline -- see that file's doc comment for why
+  // this links out to Dotloop rather than attaching the actual file) -----
+
+  async createNote(body: string, timestamp: Date): Promise<HubSpotObject<any>> {
+    const res = await this.http.post(`/crm/v3/objects/notes`, {
+      properties: { hs_note_body: body, hs_timestamp: timestamp.toISOString() },
+    });
+    return res.data;
+  }
+
+  /** 214 is HubSpot's default v3 association type id for note -> deal. */
+  async associateNoteWithDeal(noteId: string, dealId: string): Promise<void> {
+    await this.http.put(`/crm/v3/objects/notes/${noteId}/associations/deal/${dealId}/214`);
+  }
+
   // ---- Custom properties (used to store Dotloop sync state on the record) -
 
   /**

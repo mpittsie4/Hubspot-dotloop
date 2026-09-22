@@ -17,6 +17,7 @@ import {
 } from "./dealLoopMapping";
 import { hashSyncPayload } from "../utils/crypto";
 import { logger } from "../utils/logger";
+import { syncLoopDocuments } from "./documentSync";
 
 const HUBSPOT_DEAL_PROPERTIES = ["dealname", "amount", "dealstage", "closedate", "pipeline"];
 
@@ -159,6 +160,7 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
     });
     await updateMapping(mapping.id, { lastSyncedHash: hash, lastSyncedAt: new Date(), lastSyncOrigin: SyncOrigin.DOTLOOP });
     await logSync(tenant.id, "DOTLOOP_TO_HUBSPOT", loopId, mapping.hubspotId, "SUCCESS");
+    await syncDocumentsSafely(tenant, dotloop, hubspot, profileId, loopId, mapping.hubspotId, summary.loopUrl);
     return;
   }
 
@@ -184,4 +186,28 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
     lastSyncOrigin: SyncOrigin.DOTLOOP,
   });
   await logSync(tenant.id, "DOTLOOP_TO_HUBSPOT", loopId, deal.id, "SUCCESS", "created deal + mapping");
+  await syncDocumentsSafely(tenant, dotloop, hubspot, profileId, loopId, deal.id, summary.loopUrl);
+}
+
+/**
+ * syncLoopDocuments already contains its own per-folder/per-document error
+ * handling, but this call site wraps it too so a genuinely unexpected bug
+ * in the document-sync path (new this feature, less battle-tested than the
+ * rest of the sync engine) can never turn a successful deal/loop sync into
+ * a logged ERROR for the whole job.
+ */
+async function syncDocumentsSafely(
+  tenant: TenantRow,
+  dotloop: DotloopClient,
+  hubspot: HubSpotClient,
+  profileId: string,
+  loopId: string,
+  hubspotDealId: string,
+  loopUrl?: string
+) {
+  try {
+    await syncLoopDocuments(tenant, dotloop, hubspot, profileId, loopId, hubspotDealId, loopUrl);
+  } catch (err) {
+    logger.error({ err, tenantId: tenant.id, loopId, hubspotDealId }, "Document sync failed for this loop; deal/loop sync itself still succeeded");
+  }
 }

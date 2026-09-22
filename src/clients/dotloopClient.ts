@@ -45,6 +45,27 @@ export interface DotloopParticipant {
   role?: string; // e.g. "BUYER", "SELLER", "BUYING_AGENT", ...
 }
 
+export interface DotloopFolder {
+  id: number;
+  name: string;
+}
+
+/**
+ * Metadata only -- confirmed against a real loop via scripts/inspectLoopDocuments.ts
+ * that Dotloop's public API does not expose the document's actual file
+ * bytes (no documented endpoint returns them, and the one plausible
+ * undocumented URL shape returns 404). `updated` is what
+ * sync/documentSync.ts watches to tell a newly-added document from one
+ * that was merely re-touched.
+ */
+export interface DotloopDocument {
+  id: number;
+  name: string;
+  folderId: number;
+  created?: string;
+  updated?: string;
+}
+
 /**
  * Thin wrapper around the Dotloop Public API v2 with transparent token
  * refresh. Pass the tenant's Dotloop account id as accountKey to operate as
@@ -227,6 +248,18 @@ export class DotloopClient {
 
   async listSubscriptions(): Promise<any[]> {
     const res = await this.http.get("/subscription");
+    return res.data?.data ?? [];
+  }
+
+  // ---- Documents (metadata only -- see DotloopDocument's doc comment) --
+
+  async listFolders(profileId: string, loopId: string | number): Promise<DotloopFolder[]> {
+    const res = await this.http.get(`/profile/${profileId}/loop/${loopId}/folder`);
+    return res.data?.data ?? [];
+  }
+
+  async listDocuments(profileId: string, loopId: string | number, folderId: string | number): Promise<DotloopDocument[]> {
+    const res = await this.http.get(`/profile/${profileId}/loop/${loopId}/folder/${folderId}/document`);
     return res.data?.data ?? [];
   }
 
