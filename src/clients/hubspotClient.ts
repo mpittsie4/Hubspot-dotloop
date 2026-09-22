@@ -273,9 +273,21 @@ export class HubSpotClient {
     return res.data;
   }
 
-  /** 214 is HubSpot's default v3 association type id for note -> deal. */
+  /**
+   * 214 is HubSpot's default v3 association type id for note -> deal.
+   *
+   * This PUT has no request body, and axios' default Content-Type for a
+   * body-less request is application/x-www-form-urlencoded -- HubSpot's v3
+   * associations endpoint rejects that with 415 Unsupported Media Type
+   * (confirmed live against a real note/deal pair). Every other call on
+   * this client sends a JSON object as the body, so axios sets
+   * Content-Type: application/json for them automatically and never hits
+   * this; forcing it explicitly here is what fixes it.
+   */
   async associateNoteWithDeal(noteId: string, dealId: string): Promise<void> {
-    await this.http.put(`/crm/v3/objects/notes/${noteId}/associations/deal/${dealId}/214`);
+    await this.http.put(`/crm/v3/objects/notes/${noteId}/associations/deal/${dealId}/214`, null, {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   // ---- Custom properties (used to store Dotloop sync state on the record) -
