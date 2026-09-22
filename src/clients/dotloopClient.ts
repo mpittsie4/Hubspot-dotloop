@@ -230,6 +230,35 @@ export class DotloopClient {
     return res.data?.data ?? [];
   }
 
+  /**
+   * Low-level escape hatch for one-off exploration scripts (see
+   * scripts/inspectLoopDocuments.ts) against endpoints/response shapes this
+   * client doesn't have a typed method for yet -- e.g. checking whether an
+   * endpoint the official docs only describe as JSON-metadata actually
+   * returns binary content for a different Accept header or path. GET only.
+   * Not meant to be called from the sync path -- add a proper typed method
+   * above once behavior against the real API is confirmed, the same way
+   * every other method on this class came to exist.
+   */
+  async rawRequest(
+    path: string,
+    opts: { headers?: Record<string, string>; responseType?: "json" | "arraybuffer" } = {}
+  ): Promise<{ status: number; headers: Record<string, any>; data: any }> {
+    try {
+      const res = await this.http.get(path, {
+        headers: opts.headers,
+        responseType: opts.responseType === "arraybuffer" ? "arraybuffer" : "json",
+        validateStatus: () => true, // inspect error responses too, instead of throwing
+      });
+      return { status: res.status, headers: res.headers as any, data: res.data };
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response) {
+        return { status: err.response.status, headers: err.response.headers as any, data: err.response.data };
+      }
+      throw err;
+    }
+  }
+
   private async paginate<T>(path: string, params: Record<string, string>): Promise<T[]> {
     const results: T[] = [];
     let batchNumber = 1;
