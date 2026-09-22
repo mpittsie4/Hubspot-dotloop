@@ -145,7 +145,7 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
       // document's own `updated` timestamp), so it must still run here;
       // otherwise a loop whose fields never change again after its first
       // sync would never surface a newly added document.
-      await syncDocumentsSafely(tenant, dotloop, hubspot, profileId, loopId, mapping.hubspotId, summary.loopUrl);
+      await syncDocumentsSafely(tenant, dotloop, profileId, loopId, mapping.hubspotId);
       return;
     }
     // Which HubSpot stage a Dotloop status maps back to depends on which
@@ -168,7 +168,7 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
     });
     await updateMapping(mapping.id, { lastSyncedHash: hash, lastSyncedAt: new Date(), lastSyncOrigin: SyncOrigin.DOTLOOP });
     await logSync(tenant.id, "DOTLOOP_TO_HUBSPOT", loopId, mapping.hubspotId, "SUCCESS");
-    await syncDocumentsSafely(tenant, dotloop, hubspot, profileId, loopId, mapping.hubspotId, summary.loopUrl);
+    await syncDocumentsSafely(tenant, dotloop, profileId, loopId, mapping.hubspotId);
     return;
   }
 
@@ -194,7 +194,7 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
     lastSyncOrigin: SyncOrigin.DOTLOOP,
   });
   await logSync(tenant.id, "DOTLOOP_TO_HUBSPOT", loopId, deal.id, "SUCCESS", "created deal + mapping");
-  await syncDocumentsSafely(tenant, dotloop, hubspot, profileId, loopId, deal.id, summary.loopUrl);
+  await syncDocumentsSafely(tenant, dotloop, profileId, loopId, deal.id);
 }
 
 /**
@@ -207,14 +207,12 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
 async function syncDocumentsSafely(
   tenant: TenantRow,
   dotloop: DotloopClient,
-  hubspot: HubSpotClient,
   profileId: string,
   loopId: string,
-  hubspotDealId: string,
-  loopUrl?: string
+  hubspotDealId: string
 ) {
   try {
-    await syncLoopDocuments(tenant, dotloop, hubspot, profileId, loopId, hubspotDealId, loopUrl);
+    await syncLoopDocuments(tenant, dotloop, profileId, loopId, hubspotDealId);
   } catch (err) {
     logger.error({ err, tenantId: tenant.id, loopId, hubspotDealId }, "Document sync failed for this loop; deal/loop sync itself still succeeded");
   }

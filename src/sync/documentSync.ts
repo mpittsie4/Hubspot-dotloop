@@ -1,43 +1,48 @@
 import { TenantRow } from "../db/types";
 import { findSyncedDocument, upsertSyncedDocument } from "../db/documentSyncRepo";
 import { DotloopClient } from "../clients/dotloopClient";
-import { HubSpotClient } from "../clients/hubspotClient";
 import { logger } from "../utils/logger";
 
 /**
- * Surfaces Dotloop loop documents on the linked HubSpot deal -- new ones as
- * they're added, and again each time an existing one is updated.
+ * Keeps `synced_documents` in sync with the documents actually on a Dotloop
+ * loop -- new ones as they're added, and again each time an existing one is
+ * updated -- so the "Dotloop Sync Status" CRM card (see
+ * routes/hubspotProxyRoutes.ts's /deals/:dealId/dotloop-status endpoint,
+ * consumed by src/app/cards/DealSyncCard.tsx in the HubSpot Developer
+ * Project) can list them as links on the deal.
  *
- * This is "Plan A" from the document-sync feature request: Dotloop's
+ * This used to post a HubSpot note per new/updated document instead (see
+ * git history) -- Mason asked to move that onto the card as document links
+ * rather than timeline notes, so this module no longer talks to HubSpot at
+ * all; it just keeps this table current and the card's proxy endpoint reads
+ * it directly.
+ *
+ * Still "Plan A" from the original document-sync feature request: Dotloop's
  * public API only exposes document *metadata* (id/name/folder/timestamps),
  * not the actual file bytes -- confirmed against a real loop via
  * scripts/inspectLoopDocuments.ts (the documented endpoint returns JSON
  * metadata only; asking for Accept: application/pdf gets a 403; the one
- * plausible undocumented "legacy" download URL shape returns 404). So
- * instead of attaching the real file to the deal, this posts a HubSpot
- * note linking back to the document's loop, across every folder on the
- * loop (no folder-name filtering -- Mason wants every new/updated
- * document, not just specific folders). If Dotloop ever exposes real file
- * downloads (Plan B -- see the roadmap doc), this is the natural place to
- * swap the note-with-a-link for the upload-file + create-note +
- * associate-to-deal flow HubSpot uses elsewhere for file attachments.
+ * plausible undocumented "legacy" download URL shape returns 404) -- and
+ * Dotloop's API doesn't expose a per-document view URL either, so every
+ * document a deal shows links to that deal's loop as a whole (`loopUrl`),
+ * not to the specific document within it. If Dotloop ever exposes a real
+ * per-document URL or file download (Plan B -- see the roadmap doc), this
+ * is the natural place to start recording that instead.
  *
  * Called from sync/dealLoopSync.ts's syncLoopFromDotloop, i.e. on every
  * LOOP_UPDATED webhook and every reconciliation pass that touches this
- * loop -- not its own separate trigger. A document only produces a new
- * note when it's never been seen before, or when Dotloop's own `updated`
- * timestamp on it has moved past what's recorded in synced_documents;
- * anything else is a no-op so an unrelated loop-field change doesn't spam
- * the deal timeline with a note per document per poll.
+ * loop -- not its own separate trigger. A document only writes a new row
+ * (or touches an existing one) when it's never been seen before, or when
+ * Dotloop's own `updated` timestamp on it has moved past what's recorded;
+ * anything else is a no-op so an unrelated loop-field change doesn't
+ * rewrite every document row on every poll.
  */
 export async function syncLoopDocuments(
   tenant: TenantRow,
   dotloop: DotloopClient,
-  hubspot: HubSpotClient,
   profileId: string,
   loopId: string,
-  hubspotDealId: string,
-  loopUrl?: string
+  hubspotDealId: string
 ): Promise<void> {
   let folders;
   try {
@@ -61,11 +66,11 @@ export async function syncLoopDocuments(
 
     for (const doc of documents) {
       try {
-        await syncOneDocument(tenant, hubspot, loopId, folder.name, hubspotDealId, loopUrl, doc);
+        await syncOneDocument(tenant, loopId, folder.name, hubspotDealId, doc);
       } catch (err) {
         logger.error(
           { err, tenantId: tenant.id, loopId, documentId: doc.id },
-          "Failed to sync one Dotloop document to HubSpot; continuing with the rest"
+          "Failed to record one Dotloop document; continuing with the rest"
         );
       }
     }
@@ -74,11 +79,9 @@ export async function syncLoopDocuments(
 
 async function syncOneDocument(
   tenant: TenantRow,
-  hubspot: HubSpotClient,
   loopId: string,
   folderName: string,
   hubspotDealId: string,
-  loopUrl: string | undefined,
   doc: { id: number; name: string; updated?: string }
 ): Promise<void> {
   const documentId = String(doc.id);
@@ -90,16 +93,8 @@ async function syncOneDocument(
     !isNew && dotloopUpdatedAt && (!existing!.dotloopUpdatedAt || dotloopUpdatedAt.getTime() !== existing!.dotloopUpdatedAt.getTime());
 
   if (!isNew && !isChanged) {
-    return; // already notified HubSpot about this exact version of this document
+    return; // already have this exact version of this document recorded
   }
-
-  const linkLine = loopUrl ? `\n\nView it in Dotloop: ${loopUrl}` : "";
-  const noteBody = isNew
-    ? `New document added in Dotloop ("${folderName}"): ${doc.name}${linkLine}`
-    : `Document updated in Dotloop ("${folderName}"): ${doc.name}${linkLine}`;
-
-  const note = await hubspot.createNote(noteBody, new Date());
-  await hubspot.associateNoteWithDeal(note.id, hubspotDealId);
 
   await upsertSyncedDocument({
     tenantId: tenant.id,
@@ -109,11 +104,7 @@ async function syncOneDocument(
     folderName,
     dotloopUpdatedAt,
     hubspotDealId,
-    hubspotNoteId: note.id,
   });
 
-  logger.info(
-    { tenantId: tenant.id, loopId, documentId, hubspotDealId, isNew },
-    "Notified HubSpot deal of Dotloop document"
-  );
+  logger.info({ tenantId: tenant.id, loopId, documentId, hubspotDealId, isNew }, "Recorded Dotloop document for deal's sync card");
 }

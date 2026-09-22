@@ -39,6 +39,28 @@ export async function findSyncedDocument(tenantId: string, dotloopDocumentId: st
   return res.rows[0] ? toRow(res.rows[0]) : null;
 }
 
+/**
+ * Documents known for a deal's loop(s), most-recently-updated first -- backs
+ * the "Dotloop Sync Status" card's document links (see
+ * routes/hubspotProxyRoutes.ts's /deals/:dealId/dotloop-status endpoint).
+ * `limit` caps how many the card renders; there's no pagination on the card
+ * side, so keep this reasonably small.
+ */
+export async function listSyncedDocumentsForDeal(
+  tenantId: string,
+  hubspotDealId: string,
+  limit = 10
+): Promise<SyncedDocumentRow[]> {
+  const res = await pool.query(
+    `SELECT * FROM synced_documents
+     WHERE tenant_id = $1 AND hubspot_deal_id = $2
+     ORDER BY COALESCE(dotloop_updated_at, updated_at) DESC
+     LIMIT $3`,
+    [tenantId, hubspotDealId, limit]
+  );
+  return res.rows.map(toRow);
+}
+
 export interface UpsertSyncedDocumentInput {
   tenantId: string;
   dotloopLoopId: string;
@@ -47,10 +69,17 @@ export interface UpsertSyncedDocumentInput {
   folderName: string | null;
   dotloopUpdatedAt: Date | null;
   hubspotDealId: string;
-  hubspotNoteId: string | null;
+  /**
+   * Left over from when new/updated documents got a HubSpot note (see
+   * sync/documentSync.ts's doc comment) -- that note is gone in favor of the
+   * "Dotloop Sync Status" card listing documents directly, so callers no
+   * longer have a note id to pass. Kept nullable rather than dropped so
+   * existing rows (and the column) don't need a migration.
+   */
+  hubspotNoteId?: string | null;
 }
 
-/** Records (or updates) that this exact version of a document has been notified to HubSpot. */
+/** Records (or updates) the current metadata for one Dotloop loop document, keyed by (tenant, document id). */
 export async function upsertSyncedDocument(input: UpsertSyncedDocumentInput): Promise<SyncedDocumentRow> {
   const res = await pool.query(
     `INSERT INTO synced_documents
@@ -72,7 +101,7 @@ export async function upsertSyncedDocument(input: UpsertSyncedDocumentInput): Pr
       input.folderName,
       input.dotloopUpdatedAt,
       input.hubspotDealId,
-      input.hubspotNoteId,
+      input.hubspotNoteId ?? null,
     ]
   );
   return toRow(res.rows[0]);

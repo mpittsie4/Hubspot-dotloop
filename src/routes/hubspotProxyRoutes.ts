@@ -2,6 +2,8 @@ import { NextFunction, Request, Response, Router } from "express";
 import { config } from "../config";
 import { verifyHubSpotSignature } from "../utils/crypto";
 import { HubSpotClient } from "../clients/hubspotClient";
+import { listActiveTenants } from "../db/tenantRepo";
+import { listSyncedDocumentsForDeal } from "../db/documentSyncRepo";
 import { logger } from "../utils/logger";
 
 /**
@@ -80,6 +82,24 @@ const DOTLOOP_DEAL_PROPERTIES = [
   "dotloop_last_synced_at",
 ];
 
+/**
+ * This proxy layer (like HubSpotClient.create()/DotloopClient.create() with
+ * no accountKey, above and elsewhere in this file) assumes a single
+ * connected tenant -- there's no per-request tenant context to resolve from
+ * a UI extension call. Mirrors tokenStore.getSoleToken()'s same assumption,
+ * just against the tenants table instead of oauth_tokens.
+ */
+async function getSoleTenant() {
+  const tenants = await listActiveTenants();
+  if (tenants.length === 0) {
+    throw new Error("No active tenant found.");
+  }
+  if (tenants.length > 1) {
+    throw new Error(`Multiple active tenants found (${tenants.map((t) => t.id).join(", ")}); this proxy assumes a single tenant.`);
+  }
+  return tenants[0];
+}
+
 hubspotProxyRouter.get("/deals/:dealId/dotloop-status", requireHubSpotSignature, async (req, res) => {
   const { dealId } = req.params;
   try {
@@ -88,7 +108,29 @@ hubspotProxyRouter.get("/deals/:dealId/dotloop-status", requireHubSpotSignature,
     if (!deal) {
       return res.status(404).json({ error: `Deal ${dealId} not found.` });
     }
-    res.json({ properties: deal.properties });
+
+    // Document links are best-effort: a lookup failure here shouldn't hide
+    // the sync status the card already has data for.
+    let documents: Array<{
+      documentName: string | null;
+      folderName: string | null;
+      dotloopUpdatedAt: string | null;
+      loopUrl: string | null;
+    }> = [];
+    try {
+      const tenant = await getSoleTenant();
+      const rows = await listSyncedDocumentsForDeal(tenant.id, dealId);
+      documents = rows.map((row) => ({
+        documentName: row.documentName,
+        folderName: row.folderName,
+        dotloopUpdatedAt: row.dotloopUpdatedAt ? row.dotloopUpdatedAt.toISOString() : null,
+        loopUrl: deal.properties.dotloop_loop_url ?? null,
+      }));
+    } catch (err) {
+      logger.error({ err, dealId }, "Failed to fetch synced documents for card proxy; returning sync status without them");
+    }
+
+    res.json({ properties: deal.properties, documents });
   } catch (err) {
     logger.error({ err, dealId }, "Failed to fetch dotloop sync status for card proxy");
     res.status(502).json({ error: "Failed to fetch Dotloop sync status from HubSpot." });
