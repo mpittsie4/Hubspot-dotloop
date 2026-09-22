@@ -138,6 +138,14 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
   if (mapping) {
     if (mapping.lastSyncedHash === hash) {
       await logSync(tenant.id, "DOTLOOP_TO_HUBSPOT", loopId, mapping.hubspotId, "SKIPPED", "no-op / echo");
+      // The echo/no-op hash only covers the loop's own summary/detail fields
+      // (see dealLoopMapping.ts's canonical shape) -- it doesn't change just
+      // because a document was added or updated on the loop. Document sync
+      // has its own independent dedup (synced_documents, keyed off each
+      // document's own `updated` timestamp), so it must still run here;
+      // otherwise a loop whose fields never change again after its first
+      // sync would never surface a newly added document.
+      await syncDocumentsSafely(tenant, dotloop, hubspot, profileId, loopId, mapping.hubspotId, summary.loopUrl);
       return;
     }
     // Which HubSpot stage a Dotloop status maps back to depends on which
