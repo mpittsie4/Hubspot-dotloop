@@ -18,6 +18,7 @@ import {
 import { hashSyncPayload } from "../utils/crypto";
 import { logger } from "../utils/logger";
 import { syncLoopDocuments } from "./documentSync";
+import { syncParticipantsForDeal } from "./participantSync";
 
 const HUBSPOT_DEAL_PROPERTIES = ["dealname", "amount", "dealstage", "closedate", "pipeline"];
 
@@ -67,6 +68,12 @@ export async function syncDealFromHubSpot(tenant: TenantRow, hubspotDealId: stri
   if (mapping) {
     if (mapping.lastSyncedHash === hash) {
       await logSync(tenant.id, "HUBSPOT_TO_DOTLOOP", hubspotDealId, mapping.dotloopId, "SKIPPED", "no-op / echo");
+      // Same reasoning as syncDocumentsSafely below: the hash only covers
+      // this deal's own core fields, not its contact associations, so an
+      // association-only change (adding a Buyer, say) still needs a
+      // participant sync pass even when nothing else on the deal changed.
+      const profileId = mapping.dotloopProfileId ?? (await dotloop.resolveProfileId());
+      await syncParticipantsSafely(tenant, hubspot, dotloop, hubspotDealId, profileId, mapping.dotloopId);
       return;
     }
     const profileId = mapping.dotloopProfileId ?? (await dotloop.resolveProfileId());
@@ -74,6 +81,7 @@ export async function syncDealFromHubSpot(tenant: TenantRow, hubspotDealId: stri
     await hubspot.updateDeal(hubspotDealId, dotloopSyncStatusProperties({ id: mapping.dotloopId }));
     await updateMapping(mapping.id, { lastSyncedHash: hash, lastSyncedAt: new Date(), lastSyncOrigin: SyncOrigin.HUBSPOT });
     await logSync(tenant.id, "HUBSPOT_TO_DOTLOOP", hubspotDealId, mapping.dotloopId, "SUCCESS");
+    await syncParticipantsSafely(tenant, hubspot, dotloop, hubspotDealId, profileId, mapping.dotloopId);
     return;
   }
 
@@ -113,6 +121,7 @@ export async function syncDealFromHubSpot(tenant: TenantRow, hubspotDealId: stri
     lastSyncOrigin: SyncOrigin.HUBSPOT,
   });
   await logSync(tenant.id, "HUBSPOT_TO_DOTLOOP", hubspotDealId, String(loop.id), "SUCCESS", "created loop + mapping");
+  await syncParticipantsSafely(tenant, hubspot, dotloop, hubspotDealId, profileId, String(loop.id));
 }
 
 /** Syncs a single Dotloop loop -> its HubSpot deal counterpart, for one tenant. */
@@ -146,6 +155,7 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
       // otherwise a loop whose fields never change again after its first
       // sync would never surface a newly added document.
       await syncDocumentsSafely(tenant, dotloop, profileId, loopId, mapping.hubspotId);
+      await syncParticipantsSafely(tenant, hubspot, dotloop, mapping.hubspotId, profileId, loopId);
       return;
     }
     // Which HubSpot stage a Dotloop status maps back to depends on which
@@ -169,6 +179,7 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
     await updateMapping(mapping.id, { lastSyncedHash: hash, lastSyncedAt: new Date(), lastSyncOrigin: SyncOrigin.DOTLOOP });
     await logSync(tenant.id, "DOTLOOP_TO_HUBSPOT", loopId, mapping.hubspotId, "SUCCESS");
     await syncDocumentsSafely(tenant, dotloop, profileId, loopId, mapping.hubspotId);
+    await syncParticipantsSafely(tenant, hubspot, dotloop, mapping.hubspotId, profileId, loopId);
     return;
   }
 
@@ -195,6 +206,7 @@ export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, 
   });
   await logSync(tenant.id, "DOTLOOP_TO_HUBSPOT", loopId, deal.id, "SUCCESS", "created deal + mapping");
   await syncDocumentsSafely(tenant, dotloop, profileId, loopId, deal.id);
+  await syncParticipantsSafely(tenant, hubspot, dotloop, deal.id, profileId, loopId);
 }
 
 /**
@@ -215,5 +227,26 @@ async function syncDocumentsSafely(
     await syncLoopDocuments(tenant, dotloop, profileId, loopId, hubspotDealId);
   } catch (err) {
     logger.error({ err, tenantId: tenant.id, loopId, hubspotDealId }, "Document sync failed for this loop; deal/loop sync itself still succeeded");
+  }
+}
+
+/**
+ * syncParticipantsForDeal already isolates failures per contact/role, but
+ * this call site wraps it too (same rationale as syncDocumentsSafely above)
+ * so a bug in this newer, less battle-tested path can never turn an
+ * otherwise-successful deal/loop sync into a logged ERROR for the whole job.
+ */
+async function syncParticipantsSafely(
+  tenant: TenantRow,
+  hubspot: HubSpotClient,
+  dotloop: DotloopClient,
+  hubspotDealId: string,
+  profileId: string,
+  loopId: string
+) {
+  try {
+    await syncParticipantsForDeal(tenant, hubspot, dotloop, hubspotDealId, profileId, loopId);
+  } catch (err) {
+    logger.error({ err, tenantId: tenant.id, hubspotDealId, loopId }, "Participant sync failed for this deal; deal/loop sync itself still succeeded");
   }
 }

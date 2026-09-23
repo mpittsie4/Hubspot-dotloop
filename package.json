@@ -13,6 +13,9 @@
     "register:dotloop-subscriptions": "tsx scripts/registerDotloopSubscriptions.ts",
     "register:hubspot-webhooks": "tsx scripts/registerHubspotWebhooks.ts",
     "inspect:loop-documents": "tsx scripts/inspectLoopDocuments.ts",
+    "list:association-labels": "tsx scripts/listAssociationLabels.ts",
+    "set:contact-role-mapping": "tsx scripts/setContactRoleMapping.ts",
+    "seed:existing-participant-associations": "tsx scripts/seedExistingParticipantAssociations.ts",
     "test": "vitest run"
   },
   "dependencies": {

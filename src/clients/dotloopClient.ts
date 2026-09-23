@@ -44,6 +44,12 @@ export interface DotloopParticipant {
   fullName?: string;
   email?: string;
   role?: string; // e.g. "BUYER", "SELLER", "BUYING_AGENT", ...
+  // Confirmed via Dotloop's public API docs: participant fields mirror loop
+  // detail's style (human-label keys, not camelCase) for several fields --
+  // "Company Name" is the one this connector populates (see
+  // sync/participantSync.ts), from the HubSpot contact's associated
+  // Company, for vendor-type participants (lender, title/escrow, etc.).
+  "Company Name"?: string;
 }
 
 export interface DotloopFolder {

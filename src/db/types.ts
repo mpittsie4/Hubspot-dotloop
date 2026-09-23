@@ -79,6 +79,38 @@ export interface PipelineConfig {
   stages: PipelineStage[];
 }
 
+/**
+ * Maps one HubSpot Deal<->Contact association label to the Dotloop
+ * participant role a matching contact should be added to the deal's loop
+ * as. Per-tenant (like PipelineConfig above) because association-label
+ * typeIds are custom per HubSpot portal, not a fixed Dotloop-style
+ * vocabulary -- look them up for a given tenant with
+ * scripts/listAssociationLabels.ts, then set via
+ * tenantRepo.updateContactRoleMapping().
+ *
+ * Deliberately HubSpot -> Dotloop only (added 2026-09-23, per Mason's
+ * "map ... contacts, companies, association labels" request): this pushes
+ * a HubSpot deal's labeled contact associations onto the Dotloop loop as
+ * participants (sync/participantSync.ts). It does not sync the reverse
+ * direction -- a participant added directly in Dotloop does not create or
+ * update a HubSpot association -- even though Dotloop's
+ * LOOP_PARTICIPANT_CREATED/UPDATED webhook events are already subscribed
+ * to (see scripts/registerDotloopSubscriptions.ts) for future use. Flagged
+ * as a known gap, not started.
+ *
+ * Also deliberately scoped to NEW associations only: existing
+ * associations from before this feature shipped are pre-seeded as
+ * SKIPPED_PRE_EXISTING in the loop_participants table (see
+ * scripts/seedExistingParticipantAssociations.ts) so this never backfills
+ * a tenant's existing live associations onto their already-created loops.
+ */
+export interface ContactRoleMapping {
+  hubspotAssociationTypeId: number;
+  hubspotAssociationCategory: "HUBSPOT_DEFINED" | "USER_DEFINED";
+  hubspotLabel: string; // for readability/logging only; typeId+category is what's actually matched on
+  dotloopRole: string; // Dotloop participant role enum value, e.g. "BUYER", "LOAN_OFFICER"
+}
+
 export interface TenantRow {
   id: string;
   name: string | null;
@@ -86,6 +118,7 @@ export interface TenantRow {
   dotloopAccountId: string | null;
   dotloopProfileId: string | null;
   pipelinesConfig: PipelineConfig[];
+  contactRoleMapping: ContactRoleMapping[];
   status: TenantStatus;
   createdAt: Date;
   updatedAt: Date;

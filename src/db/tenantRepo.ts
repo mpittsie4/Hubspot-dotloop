@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { pool } from "./client";
-import { PipelineConfig, TenantRow } from "./types";
+import { ContactRoleMapping, PipelineConfig, TenantRow } from "./types";
 
 function toRow(r: any): TenantRow {
   return {
@@ -10,6 +10,7 @@ function toRow(r: any): TenantRow {
     dotloopAccountId: r.dotloop_account_id,
     dotloopProfileId: r.dotloop_profile_id,
     pipelinesConfig: (r.pipelines_config ?? []) as PipelineConfig[],
+    contactRoleMapping: (r.contact_role_mapping ?? []) as ContactRoleMapping[],
     status: r.status,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -115,6 +116,17 @@ export async function updatePipelinesConfig(tenantId: string, pipelines: Pipelin
   const res = await pool.query(
     `UPDATE tenants SET pipelines_config = $2::jsonb, updated_at = now() WHERE id = $1 RETURNING *`,
     [tenantId, JSON.stringify(pipelines)]
+  );
+  if (!res.rows[0]) throw new Error(`Unknown tenant: ${tenantId}`);
+  return toRow(res.rows[0]);
+}
+
+/** See ContactRoleMapping's doc comment in db/types.ts and
+ *  scripts/listAssociationLabels.ts for how to populate this per tenant. */
+export async function updateContactRoleMapping(tenantId: string, mapping: ContactRoleMapping[]): Promise<TenantRow> {
+  const res = await pool.query(
+    `UPDATE tenants SET contact_role_mapping = $2::jsonb, updated_at = now() WHERE id = $1 RETURNING *`,
+    [tenantId, JSON.stringify(mapping)]
   );
   if (!res.rows[0]) throw new Error(`Unknown tenant: ${tenantId}`);
   return toRow(res.rows[0]);

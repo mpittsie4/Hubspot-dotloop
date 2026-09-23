@@ -26,6 +26,31 @@ export interface HubSpotDealProperties {
   [key: string]: string | undefined;
 }
 
+export interface HubSpotCompanyProperties {
+  name?: string;
+  domain?: string;
+  [key: string]: string | undefined;
+}
+
+/** One HubSpot association-label definition, e.g. a custom "Buyer" label
+ *  between deals and contacts. `label` is null for the default/unlabeled
+ *  association a pair of object types always has (e.g. deal<->company's
+ *  built-in "Primary"). typeId/category together are what you actually
+ *  filter/write associations by -- label text is for humans only and can
+ *  be renamed without changing typeId. See scripts/listAssociationLabels.ts. */
+export interface HubSpotAssociationLabel {
+  category: "HUBSPOT_DEFINED" | "USER_DEFINED";
+  typeId: number;
+  label: string | null;
+}
+
+/** One existing labeled association from a source object to a single
+ *  target object, as returned by the v4 associations read endpoint. */
+export interface HubSpotAssociationV4 {
+  toObjectId: string;
+  associationTypes: Array<{ category: "HUBSPOT_DEFINED" | "USER_DEFINED"; typeId: number; label: string | null }>;
+}
+
 export interface HubSpotObject<P> {
   id: string;
   properties: P;
@@ -260,6 +285,74 @@ export class HubSpotClient {
 
   async listRecentDeals(since: Date, properties: string[]): Promise<HubSpotObject<HubSpotDealProperties>[]> {
     return this.searchByLastModified("deals", since, properties);
+  }
+
+  // ---- Companies --------------------------------------------------------
+
+  async getCompany(id: string, properties: string[]): Promise<HubSpotObject<HubSpotCompanyProperties> | null> {
+    try {
+      const res = await this.http.get(`/crm/v3/objects/companies/${id}`, {
+        params: { properties: properties.join(",") },
+      });
+      return res.data;
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 404) return null;
+      throw err;
+    }
+  }
+
+  // ---- Labeled associations (v4) -- used by sync/participantSync.ts to
+  // read which HubSpot deal<->contact association (e.g. "Buyer", "Seller",
+  // the custom vendor-contact labels) a given contact carries on a deal,
+  // and by scripts/listAssociationLabels.ts to discover each portal's own
+  // label typeIds (custom per-portal, unlike Dotloop's fixed loop-status
+  // vocabulary -- see db/types.ts's ContactRoleMapping doc comment). -----
+
+  /** All association-label definitions (built-in + custom) between two object types. */
+  async listAssociationLabels(fromObjectType: string, toObjectType: string): Promise<HubSpotAssociationLabel[]> {
+    const res = await this.http.get(`/crm/v4/associations/${fromObjectType}/${toObjectType}/labels`);
+    return res.data?.results ?? [];
+  }
+
+  /** Every labeled association from one object to every object of `toObjectType` it's linked to. */
+  async listAssociationsV4(
+    fromObjectType: string,
+    objectId: string,
+    toObjectType: string
+  ): Promise<HubSpotAssociationV4[]> {
+    const results: HubSpotAssociationV4[] = [];
+    let after: string | undefined;
+    do {
+      const res: any = await this.http.get(
+        `/crm/v4/objects/${fromObjectType}/${objectId}/associations/${toObjectType}`,
+        { params: after ? { after } : undefined }
+      );
+      for (const r of res.data?.results ?? []) {
+        results.push({ toObjectId: String(r.toObjectId), associationTypes: r.associationTypes ?? [] });
+      }
+      after = res.data?.paging?.next?.after;
+    } while (after);
+    return results;
+  }
+
+  /**
+   * Creates a single labeled association between two specific records.
+   * `category`/`typeId` come from listAssociationLabels (or a tenant's
+   * stored ContactRoleMapping) -- HubSpot rejects an unknown/mismatched
+   * pair with a 400, it does not silently create an unlabeled association.
+   */
+  async associateWithLabel(
+    fromObjectType: string,
+    fromObjectId: string,
+    toObjectType: string,
+    toObjectId: string,
+    category: "HUBSPOT_DEFINED" | "USER_DEFINED",
+    typeId: number
+  ): Promise<void> {
+    await this.http.put(
+      `/crm/v4/objects/${fromObjectType}/${fromObjectId}/associations/${toObjectType}/${toObjectId}`,
+      [{ associationCategory: category, associationTypeId: typeId }]
+    );
   }
 
   // ---- Notes (used by sync/documentSync.ts to surface new/updated Dotloop

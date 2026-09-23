@@ -26,6 +26,7 @@ function tenant(overrides: Partial<TenantRow> = {}): TenantRow {
     dotloopAccountId: "acct_1",
     dotloopProfileId: "profile_1",
     pipelinesConfig: [],
+    contactRoleMapping: [],
     status: TenantStatus.ACTIVE,
     createdAt: new Date(),
     updatedAt: new Date(),
