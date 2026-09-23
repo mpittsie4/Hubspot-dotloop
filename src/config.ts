@@ -66,5 +66,11 @@ export const config = {
   sync: {
     reconcileIntervalMinutes: Number(process.env.RECONCILE_INTERVAL_MINUTES ?? 15),
     reconcileInitialLookbackMinutes: Number(process.env.RECONCILE_INITIAL_LOOKBACK_MINUTES ?? 1440),
+    // How often to re-check that each tenant's Dotloop webhook subscription
+    // is still present and enabled -- see sync/subscriptionHealthCheck.ts.
+    // Daily by default: Dotloop's own backoff schedule for failed
+    // deliveries already runs for hours before a subscription auto-disables,
+    // so there's no need to poll this as often as the reconciliation pass.
+    subscriptionHealthCheckIntervalHours: Number(process.env.SUBSCRIPTION_HEALTH_CHECK_INTERVAL_HOURS ?? 24),
   },
 };

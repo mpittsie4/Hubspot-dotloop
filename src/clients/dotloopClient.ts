@@ -4,6 +4,7 @@ import { config } from "../config";
 import { getSoleToken, getToken, saveToken } from "../auth/tokenStore";
 import { refreshDotloopToken } from "../auth/dotloopOAuth";
 import { logger } from "../utils/logger";
+import { installRetryOn429 } from "../utils/httpRetry";
 
 export interface DotloopContact {
   id: number;
@@ -48,6 +49,24 @@ export interface DotloopParticipant {
 export interface DotloopFolder {
   id: number;
   name: string;
+}
+
+/**
+ * Confirmed field shape via Dotloop's public API docs (Subscriptions
+ * section): `enabled` is the field that flips to false when Dotloop
+ * auto-disables a subscription after repeated delivery failures (or when
+ * disabled explicitly) -- see sync/subscriptionHealthCheck.ts, which polls
+ * this to catch a subscription going dark before a customer notices their
+ * deals stopped updating.
+ */
+export interface DotloopSubscription {
+  id: number | string;
+  targetType: "USER" | "PROFILE";
+  targetId: number;
+  externalId?: string;
+  url: string;
+  eventTypes: string[];
+  enabled: boolean;
 }
 
 /**
@@ -96,6 +115,11 @@ export class DotloopClient {
       baseURL: config.dotloop.apiBaseUrl,
       headers: { Authorization: `Bearer ${accessToken}` },
     });
+    // Dotloop's API is documented as rate-limited (429) without published
+    // thresholds; retry transient 429s with backoff rather than failing the
+    // sync attempt outright. See claude/pre-launch-improvement-research.md
+    // item 2 and utils/httpRetry.ts.
+    installRetryOn429(this.http, { label: "dotloop" });
   }
 
   static async create(accountKey?: string): Promise<DotloopClient> {
@@ -292,7 +316,7 @@ export class DotloopClient {
     return res.data?.data ?? res.data;
   }
 
-  async listSubscriptions(): Promise<any[]> {
+  async listSubscriptions(): Promise<DotloopSubscription[]> {
     const res = await this.http.get("/subscription");
     return res.data?.data ?? [];
   }

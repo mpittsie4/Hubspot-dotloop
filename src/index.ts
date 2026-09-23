@@ -9,6 +9,7 @@ import { hubspotWebhookRouter } from "./webhooks/hubspotWebhook";
 import { hubspotProxyRouter } from "./routes/hubspotProxyRoutes";
 import { dotloopWebhookRouter } from "./webhooks/dotloopWebhook";
 import { backfillDotloopProfileIds, scheduleReconciliation } from "./sync/reconcile";
+import { runSubscriptionHealthCheck, scheduleSubscriptionHealthCheck } from "./sync/subscriptionHealthCheck";
 import { migrate } from "./db/migrate";
 
 const app = express();
@@ -56,6 +57,12 @@ async function main() {
   app.listen(config.port, () => {
     logger.info({ port: config.port }, "hubspot-dotloop-connector listening");
     scheduleReconciliation();
+    scheduleSubscriptionHealthCheck();
+    // Also run one check immediately at boot (fire-and-forget, not on the
+    // startup critical path) so a subscription that was already disabled
+    // before this deploy shows up in the logs right away instead of
+    // waiting up to subscriptionHealthCheckIntervalHours.
+    runSubscriptionHealthCheck().catch((err) => logger.error({ err }, "Startup subscription health check failed"));
   });
 }
 
