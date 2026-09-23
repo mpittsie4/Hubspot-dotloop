@@ -120,13 +120,59 @@ export class DotloopClient {
     return new DotloopClient(stored.accountKey, accessToken);
   }
 
-  /** Resolves the profile id to operate under: config override, or the first profile on the account. */
+  /**
+   * Resolves the profile id to operate under: config override, or the best
+   * guess among the account's own profiles.
+   *
+   * Dotloop's API docs state loop access is "currently restricted to
+   * INDIVIDUAL profiles only" -- an account can also have TEAM, OFFICE,
+   * COMPANY, ASSOCIATION, or NATIONAL_PARTNER profiles (GET /profile's
+   * `type` field), and nothing guarantees an INDIVIDUAL one comes back
+   * first. Picking `profiles[0]` blindly (the old behavior) would silently
+   * select a non-individual profile for an account structured that way --
+   * no error, just zero loops ever visible through it. Found during
+   * pre-launch research ahead of onboarding a second real customer
+   * (2026-09-23) -- see claude/pre-launch-improvement-research.md.
+   *
+   * Prefers an INDIVIDUAL profile (the one marked `default` if more than
+   * one qualifies), and falls back to the account's own default profile --
+   * or the first one -- with a loud warning if no INDIVIDUAL profile exists
+   * at all, so a tenant stuck in that situation shows up in the logs
+   * instead of just mysteriously never syncing anything.
+   */
   async resolveProfileId(): Promise<string> {
     if (config.dotloop.defaultProfileId) return config.dotloop.defaultProfileId;
     const res = await this.http.get("/profile");
-    const profiles = res.data?.data ?? [];
+    const profiles: Array<{ id: number | string; name?: string; type?: string; default?: boolean }> =
+      res.data?.data ?? [];
     if (!profiles.length) throw new Error("Dotloop account has no profiles");
-    return String(profiles[0].id);
+
+    const individualProfiles = profiles.filter((p) => p.type === "INDIVIDUAL");
+    if (individualProfiles.length > 0) {
+      const chosen = individualProfiles.find((p) => p.default) ?? individualProfiles[0];
+      if (individualProfiles.length > 1) {
+        logger.info(
+          { accountId: this.accountKey, profiles: individualProfiles.map((p) => ({ id: p.id, name: p.name })), chosenId: chosen.id },
+          "Multiple INDIVIDUAL Dotloop profiles found; chose the default one (or the first)"
+        );
+      }
+      return String(chosen.id);
+    }
+
+    const fallback = profiles.find((p) => p.default) ?? profiles[0];
+    logger.warn(
+      {
+        accountId: this.accountKey,
+        profiles: profiles.map((p) => ({ id: p.id, name: p.name, type: p.type, default: p.default })),
+        chosenId: fallback.id,
+        chosenType: fallback.type,
+      },
+      "No INDIVIDUAL Dotloop profile found on this account -- Dotloop's API restricts loop access to " +
+        "INDIVIDUAL profiles, so syncing under this profile type will likely see zero loops. Falling back " +
+        "to the account's default (or first) profile, but this needs a human to check the account's actual " +
+        "Dotloop profile setup."
+    );
+    return String(fallback.id);
   }
 
   // ---- Contacts ---------------------------------------------------------
