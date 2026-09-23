@@ -94,3 +94,25 @@ export async function updateMapping(id: string, input: UpdateMappingInput): Prom
   );
   return toRow(res.rows[0]);
 }
+
+/**
+ * Re-points an existing mapping row at a new Dotloop loop id, in place.
+ *
+ * Needed for Dotloop's LOOP_MERGED event (see webhooks/dotloopWebhook.ts):
+ * when two loops merge, the "losing" loop id (fromId) stops resolving and
+ * everything continues under the surviving id (toId). Without this, the
+ * next sync pass looks up the mapping by the new id, finds nothing (the
+ * existing row is still keyed on the old id), and concludes it's a brand
+ * new loop -- creating a duplicate HubSpot deal for a transaction that
+ * already had one. Repointing the row keeps the existing deal instead.
+ */
+export async function repointMappingDotloopId(id: string, newDotloopId: string): Promise<ObjectMappingRow> {
+  const res = await pool.query(
+    `UPDATE object_mappings
+     SET dotloop_id = $2, updated_at = now()
+     WHERE id = $1
+     RETURNING *`,
+    [id, newDotloopId]
+  );
+  return toRow(res.rows[0]);
+}
