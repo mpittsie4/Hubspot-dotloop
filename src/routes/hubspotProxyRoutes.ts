@@ -2,7 +2,8 @@ import { NextFunction, Request, Response, Router } from "express";
 import { config } from "../config";
 import { verifyHubSpotSignature } from "../utils/crypto";
 import { HubSpotClient } from "../clients/hubspotClient";
-import { listActiveTenants } from "../db/tenantRepo";
+import { listActiveTenants, getTenantByHubspotPortalId } from "../db/tenantRepo";
+import { TenantRow } from "../db/types";
 import { listSyncedDocumentsForDeal } from "../db/documentSyncRepo";
 import { logger } from "../utils/logger";
 
@@ -64,9 +65,55 @@ function requireHubSpotSignature(req: Request, res: Response, next: NextFunction
   next();
 }
 
+/**
+ * Resolves which tenant a UI-extension proxy call belongs to.
+ *
+ * HubSpot's UI Extensions SDK gives every extension component a `context`
+ * prop that includes `context.portal.id` (see `@hubspot/ui-extensions`'
+ * PortalContext) -- both DealSyncCard.tsx and StageMappingSettings.tsx now
+ * pass that through as a `?portalId=` query param on their hubspot.fetch()
+ * calls. requireHubSpotSignature has already verified this exact request
+ * (method + full URI, including this query string, + body) was signed by
+ * HubSpot with this app's client secret, so the portalId can't be tampered
+ * with in transit without invalidating the signature -- the same guarantee
+ * webhooks/hubspotWebhook.ts relies on for the portalId in its payload.
+ *
+ * Falls back to the old single-tenant assumption when portalId is absent,
+ * so an not-yet-redeployed extension build doesn't hard-break -- but logs a
+ * warning, since that fallback silently breaks the moment a second tenant
+ * goes active (see the "Multiple active tenants" error it already throws).
+ */
+async function resolveTenantForRequest(req: Request): Promise<TenantRow> {
+  const portalId = typeof req.query.portalId === "string" ? req.query.portalId : undefined;
+  if (portalId) {
+    const tenant = await getTenantByHubspotPortalId(portalId);
+    if (!tenant) {
+      throw new Error(`No tenant found for HubSpot portal ${portalId}.`);
+    }
+    return tenant;
+  }
+
+  logger.warn(
+    { path: req.path },
+    "Proxy request had no portalId query param (stale extension build?); falling back to sole-tenant lookup"
+  );
+  const tenants = await listActiveTenants();
+  if (tenants.length === 0) {
+    throw new Error("No active tenant found.");
+  }
+  if (tenants.length > 1) {
+    throw new Error(
+      `Multiple active tenants found (${tenants.map((t) => t.id).join(", ")}) and no portalId was sent; ` +
+        "the calling UI extension needs to be redeployed with the portalId query param."
+    );
+  }
+  return tenants[0];
+}
+
 hubspotProxyRouter.get("/pipelines/deals", requireHubSpotSignature, async (req, res) => {
   try {
-    const client = await HubSpotClient.create();
+    const tenant = await resolveTenantForRequest(req);
+    const client = await HubSpotClient.create(tenant.hubspotPortalId ?? undefined);
     const pipelines = await client.listDealPipelines();
     res.json(pipelines);
   } catch (err) {
@@ -82,28 +129,11 @@ const DOTLOOP_DEAL_PROPERTIES = [
   "dotloop_last_synced_at",
 ];
 
-/**
- * This proxy layer (like HubSpotClient.create()/DotloopClient.create() with
- * no accountKey, above and elsewhere in this file) assumes a single
- * connected tenant -- there's no per-request tenant context to resolve from
- * a UI extension call. Mirrors tokenStore.getSoleToken()'s same assumption,
- * just against the tenants table instead of oauth_tokens.
- */
-async function getSoleTenant() {
-  const tenants = await listActiveTenants();
-  if (tenants.length === 0) {
-    throw new Error("No active tenant found.");
-  }
-  if (tenants.length > 1) {
-    throw new Error(`Multiple active tenants found (${tenants.map((t) => t.id).join(", ")}); this proxy assumes a single tenant.`);
-  }
-  return tenants[0];
-}
-
 hubspotProxyRouter.get("/deals/:dealId/dotloop-status", requireHubSpotSignature, async (req, res) => {
   const { dealId } = req.params;
   try {
-    const client = await HubSpotClient.create();
+    const tenant = await resolveTenantForRequest(req);
+    const client = await HubSpotClient.create(tenant.hubspotPortalId ?? undefined);
     const deal = await client.getDeal(dealId, DOTLOOP_DEAL_PROPERTIES);
     if (!deal) {
       return res.status(404).json({ error: `Deal ${dealId} not found.` });
@@ -118,7 +148,6 @@ hubspotProxyRouter.get("/deals/:dealId/dotloop-status", requireHubSpotSignature,
       loopUrl: string | null;
     }> = [];
     try {
-      const tenant = await getSoleTenant();
       const rows = await listSyncedDocumentsForDeal(tenant.id, dealId);
       documents = rows.map((row) => ({
         documentName: row.documentName,
