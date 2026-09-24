@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from "axios";
+import axios, { AxiosError, AxiosInstance } from "axios";
 import { Provider } from "../db/types";
 import { config } from "../config";
 import { getSoleToken, getToken, saveToken } from "../auth/tokenStore";
@@ -173,13 +173,16 @@ const DOTLOOP_CONTACT_PROPERTIES: HubSpotPropertyDefinition[] = [
 export class HubSpotClient {
   private http: AxiosInstance;
   private accountKey: string;
+  private refreshToken?: string;
 
-  private constructor(accountKey: string, accessToken: string) {
+  private constructor(accountKey: string, accessToken: string, refreshToken?: string) {
     this.accountKey = accountKey;
+    this.refreshToken = refreshToken;
     this.http = axios.create({
       baseURL: config.hubspot.apiBaseUrl,
       headers: { Authorization: `Bearer ${accessToken}` },
     });
+    this.installReactiveTokenRefresh();
   }
 
   static async create(accountKey?: string): Promise<HubSpotClient> {
@@ -190,6 +193,7 @@ export class HubSpotClient {
     const needsRefresh = stored.expiresAt.getTime() - Date.now() < 5 * 60 * 1000;
 
     let accessToken = stored.accessToken;
+    let refreshToken = stored.refreshToken;
     if (needsRefresh) {
       const refreshed = await refreshHubSpotToken(stored.refreshToken);
       await saveToken(Provider.HUBSPOT, stored.accountKey, {
@@ -198,10 +202,11 @@ export class HubSpotClient {
         expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
       });
       accessToken = refreshed.access_token;
+      refreshToken = refreshed.refresh_token;
       logger.info({ portalId: stored.accountKey }, "Refreshed HubSpot access token");
     }
 
-    return new HubSpotClient(stored.accountKey, accessToken);
+    return new HubSpotClient(stored.accountKey, accessToken, refreshToken);
   }
 
   /**
@@ -209,10 +214,56 @@ export class HubSpotClient {
    * (e.g. immediately after an OAuth callback, before/without a DB round
    * trip). Bypasses getSoleToken/getToken entirely -- used by
    * routes/authRoutes.ts right after a HubSpot connect, before the tenant
-   * row has even been updated with its portal id.
+   * row has even been updated with its portal id. No refresh token is
+   * passed here (the caller has only just exchanged the code, so this
+   * token is guaranteed fresh) -- installReactiveTokenRefresh() below is a
+   * no-op without one, which is fine for this short-lived, one-shot use.
    */
   static forToken(accountKey: string, accessToken: string): HubSpotClient {
     return new HubSpotClient(accountKey, accessToken);
+  }
+
+  /**
+   * Mirrors DotloopClient's installReactiveTokenRefresh() (see that file
+   * for the full rationale). Our own expiry bookkeeping in create() above
+   * is proactive-only: it trusts HubSpot's reported expires_in and only
+   * refreshes when our own clock says we're within 5 minutes of that. That
+   * missed a real case -- sync_logs shows "Request failed with status code
+   * 401" errors on live deal-sync jobs (e.g. 2026-09-24 20:15 UTC) that
+   * were never explained by anything else, the same failure signature the
+   * Dotloop client had before its own reactive-refresh fix. This catches a
+   * live 401 from HubSpot's API on any call and force-refreshes + retries
+   * once, regardless of what our own bookkeeping believes, instead of
+   * letting the whole sync job die immediately.
+   */
+  private installReactiveTokenRefresh(): void {
+    this.http.interceptors.response.use(undefined, async (error: AxiosError) => {
+      const requestConfig = error.config as (typeof error.config & { __hubspotAuthRetried?: boolean }) | undefined;
+
+      if (!requestConfig || error.response?.status !== 401 || requestConfig.__hubspotAuthRetried || !this.refreshToken) {
+        throw error;
+      }
+
+      requestConfig.__hubspotAuthRetried = true;
+      logger.warn(
+        { portalId: this.accountKey, url: requestConfig.url, data: error.response?.data },
+        "HubSpot rejected our access token as unauthorized; forcing a refresh and retrying once"
+      );
+
+      const refreshed = await refreshHubSpotToken(this.refreshToken);
+      this.refreshToken = refreshed.refresh_token;
+      await saveToken(Provider.HUBSPOT, this.accountKey, {
+        accessToken: refreshed.access_token,
+        refreshToken: refreshed.refresh_token,
+        expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
+      });
+
+      this.http.defaults.headers.common["Authorization"] = `Bearer ${refreshed.access_token}`;
+      requestConfig.headers = requestConfig.headers ?? {};
+      (requestConfig.headers as any).Authorization = `Bearer ${refreshed.access_token}`;
+
+      return this.http.request(requestConfig);
+    });
   }
 
   get portalId() {
