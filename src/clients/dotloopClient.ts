@@ -57,6 +57,28 @@ export interface DotloopFolder {
   name: string;
 }
 
+/** Confirmed shape via Dotloop's public API docs (GET /account). Used by
+ *  routes/authRoutes.ts's post-OAuth confirmation screen so whoever just
+ *  connected Dotloop (and Mason, watching logs) can see exactly which
+ *  Dotloop login got linked -- Dotloop's OAuth has no forced-relogin or
+ *  account-picker parameter, so nothing stops a browser already signed into
+ *  the wrong Dotloop account from silently authorizing that one instead. */
+export interface DotloopAccount {
+  id: number | string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  defaultProfileId?: number | string;
+}
+
+/** Confirmed shape via Dotloop's public API docs (GET /profile/:id). */
+export interface DotloopProfile {
+  id: number | string;
+  name?: string;
+  type?: string;
+  company?: string;
+}
+
 /**
  * Confirmed field shape via Dotloop's public API docs (Subscriptions
  * section): `enabled` is the field that flips to false when Dotloop
@@ -203,6 +225,25 @@ export class DotloopClient {
         "Dotloop profile setup."
     );
     return String(fallback.id);
+  }
+
+  // ---- Account / profile identity ---------------------------------------
+
+  /** The connected Dotloop user's own identity (name/email) -- see
+   *  routes/authRoutes.ts's post-connect confirmation screen. */
+  async getAccount(): Promise<DotloopAccount> {
+    const res = await this.http.get("/account");
+    return res.data?.data ?? res.data;
+  }
+
+  async getProfile(profileId: string): Promise<DotloopProfile | null> {
+    try {
+      const res = await this.http.get(`/profile/${profileId}`);
+      return res.data?.data ?? null;
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 404) return null;
+      throw err;
+    }
   }
 
   // ---- Contacts ---------------------------------------------------------

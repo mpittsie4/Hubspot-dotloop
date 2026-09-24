@@ -5,6 +5,7 @@ import {
   listTenantsMissingDotloopProfileId,
   setDotloopProfileId,
 } from "../db/tenantRepo";
+import { listConnectionsMissingProfileId, setConnectionProfileId } from "../db/dotloopConnectionRepo";
 import { TenantRow } from "../db/types";
 import { config } from "../config";
 import { logger } from "../utils/logger";
@@ -12,6 +13,7 @@ import { HubSpotClient } from "../clients/hubspotClient";
 import { DotloopClient } from "../clients/dotloopClient";
 import { HUBSPOT_CONTACT_PROPERTIES } from "./contactMapping";
 import { queueContactFromDotloop, queueContactFromHubSpot, queueDealFromHubSpot, queueLoopFromDotloop } from "./syncEngine";
+import { listDotloopSyncTargets } from "./dotloopRouting";
 
 const HUBSPOT_DEAL_PROPERTIES = ["dealname", "amount", "dealstage", "closedate", "pipeline"];
 
@@ -34,6 +36,28 @@ export async function backfillDotloopProfileIds() {
       logger.info({ tenantId: tenant.id, profileId }, "Backfilled Dotloop profile id for tenant");
     } catch (err) {
       logger.error({ err, tenantId: tenant.id }, "Failed to backfill Dotloop profile id for tenant");
+    }
+  }
+}
+
+/** Same self-heal as backfillDotloopProfileIds() above, for brokerage-mode
+ *  per-agent connections (db/dotloopConnectionRepo.ts) -- an agent's
+ *  connection normally gets its profile id resolved synchronously in the
+ *  OAuth callback (routes/authRoutes.ts), so this mainly covers that call
+ *  failing transiently. */
+export async function backfillConnectionProfileIds() {
+  const connections = await listConnectionsMissingProfileId();
+  for (const connection of connections) {
+    try {
+      const dotloop = await DotloopClient.create(connection.dotloopAccountId!);
+      const profileId = await dotloop.resolveProfileId();
+      await setConnectionProfileId(connection.id, profileId);
+      logger.info(
+        { tenantId: connection.tenantId, connectionId: connection.id, profileId },
+        "Backfilled Dotloop profile id for agent connection"
+      );
+    } catch (err) {
+      logger.error({ err, tenantId: connection.tenantId, connectionId: connection.id }, "Failed to backfill Dotloop profile id for agent connection");
     }
   }
 }
@@ -69,24 +93,47 @@ async function reconcileTenant(tenant: TenantRow) {
     logger.error({ err, tenantId: tenant.id }, "HubSpot reconciliation pass failed");
   }
 
-  try {
-    const dotloop = await DotloopClient.create(tenant.dotloopAccountId!);
-    let profileId = tenant.dotloopProfileId;
-    if (!profileId) {
-      profileId = await dotloop.resolveProfileId();
-      await setDotloopProfileId(tenant.id, profileId).catch((err) =>
-        logger.error({ err, tenantId: tenant.id }, "Failed to persist resolved Dotloop profile id")
-      );
+  // Dotloop contacts: tenant-level only -- standalone Contact <-> Dotloop
+  // Contact sync isn't routed per-agent (see dotloopRouting.ts's doc
+  // comment for why), so it only runs at all for a tenant with its own
+  // single account. A pure brokerage tenant (no tenant-level account) just
+  // skips this, same deliberate gap as the webhook side.
+  if (tenant.dotloopAccountId) {
+    try {
+      const dotloop = await DotloopClient.create(tenant.dotloopAccountId);
+      const contacts = await dotloop.listRecentContacts(dotloopSince);
+      for (const c of contacts) await queueContactFromDotloop(tenant, String(c.id));
+      logger.info({ tenantId: tenant.id, contacts: contacts.length }, "Reconciled contacts from Dotloop");
+    } catch (err) {
+      logger.error({ err, tenantId: tenant.id }, "Dotloop contact reconciliation pass failed");
     }
-    const [contacts, loops] = await Promise.all([
-      dotloop.listRecentContacts(dotloopSince),
-      dotloop.listRecentLoops(profileId, dotloopSince),
-    ]);
-    for (const c of contacts) await queueContactFromDotloop(tenant, String(c.id));
-    for (const l of loops) await queueLoopFromDotloop(tenant, profileId, String(l.id));
-    logger.info({ tenantId: tenant.id, contacts: contacts.length, loops: loops.length }, "Reconciled from Dotloop");
-  } catch (err) {
-    logger.error({ err, tenantId: tenant.id }, "Dotloop reconciliation pass failed");
+  }
+
+  // Dotloop loops: the tenant's own single connection, or one pass per
+  // connected agent in brokerage mode -- see dotloopRouting.ts.
+  const targets = await listDotloopSyncTargets(tenant);
+  for (const target of targets) {
+    try {
+      const dotloop = await DotloopClient.create(target.dotloopAccountId);
+      let profileId = target.dotloopProfileId;
+      if (!profileId) {
+        profileId = await dotloop.resolveProfileId();
+        const persist = target.connectionId
+          ? setConnectionProfileId(target.connectionId, profileId)
+          : setDotloopProfileId(tenant.id, profileId);
+        await persist.catch((err) =>
+          logger.error({ err, tenantId: tenant.id, dotloopAccountId: target.dotloopAccountId }, "Failed to persist resolved Dotloop profile id")
+        );
+      }
+      const loops = await dotloop.listRecentLoops(profileId, dotloopSince);
+      for (const l of loops) await queueLoopFromDotloop(tenant, target.dotloopAccountId, profileId, String(l.id));
+      logger.info(
+        { tenantId: tenant.id, dotloopAccountId: target.dotloopAccountId, loops: loops.length },
+        "Reconciled loops from Dotloop for this connection"
+      );
+    } catch (err) {
+      logger.error({ err, tenantId: tenant.id, dotloopAccountId: target.dotloopAccountId }, "Dotloop loop reconciliation failed for this connection");
+    }
   }
 
   await setReconcileTimestamps(tenant.id, now, now);
@@ -95,6 +142,7 @@ async function reconcileTenant(tenant: TenantRow) {
 /** Runs one reconciliation pass across every fully-connected (ACTIVE) tenant. */
 export async function runReconciliation() {
   await backfillDotloopProfileIds();
+  await backfillConnectionProfileIds();
 
   const tenants = await listActiveTenants();
   if (tenants.length === 0) {

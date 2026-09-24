@@ -4,10 +4,7 @@ import { TenantRow } from "../db/types";
 import { config } from "../config";
 import { logger } from "../utils/logger";
 import { DotloopClient } from "../clients/dotloopClient";
-
-// Must match the externalId this connector registers subscriptions under --
-// see scripts/registerDotloopSubscriptions.ts.
-const EXTERNAL_ID_PREFIX = "hubspot-dotloop-connector:profile:";
+import { dotloopProfileSubscriptionExternalId, listDotloopSyncTargets } from "./dotloopRouting";
 
 /**
  * Dotloop auto-disables a webhook subscription after enough consecutive
@@ -29,36 +26,42 @@ const EXTERNAL_ID_PREFIX = "hubspot-dotloop-connector:profile:";
  * actually happened is the safer path. This is a monitor, not a self-healer.
  */
 export async function checkTenantSubscriptionHealth(tenant: TenantRow): Promise<void> {
-  if (!tenant.dotloopAccountId) return;
+  const targets = await listDotloopSyncTargets(tenant);
 
-  try {
-    const dotloop = await DotloopClient.create(tenant.dotloopAccountId);
-    const subscriptions = await dotloop.listSubscriptions();
-    const expectedExternalId = `${EXTERNAL_ID_PREFIX}${tenant.id}`;
-    const ours = subscriptions.find((s) => s.externalId === expectedExternalId);
+  for (const target of targets) {
+    const expectedExternalId = dotloopProfileSubscriptionExternalId(tenant.id, target.connectionId);
+    const reregisterCmd = target.connectionId
+      ? `npm run register:dotloop-subscriptions -- --tenantId=${tenant.id} --hubspotOwnerId=<that agent's HubSpot owner id>`
+      : `npm run register:dotloop-subscriptions -- --tenantId=${tenant.id}`;
 
-    if (!ours) {
-      logger.error(
-        { tenantId: tenant.id, expectedExternalId, subscriptionCount: subscriptions.length },
-        `Dotloop subscription health check: this tenant's expected PROFILE subscription is missing -- webhooks ` +
-          `won't be delivered until it's re-registered (npm run register:dotloop-subscriptions -- --tenantId=${tenant.id})`
-      );
-      return;
+    try {
+      const dotloop = await DotloopClient.create(target.dotloopAccountId);
+      const subscriptions = await dotloop.listSubscriptions();
+      const ours = subscriptions.find((s) => s.externalId === expectedExternalId);
+
+      if (!ours) {
+        logger.error(
+          { tenantId: tenant.id, connectionId: target.connectionId, expectedExternalId, subscriptionCount: subscriptions.length },
+          `Dotloop subscription health check: expected PROFILE subscription is missing -- webhooks won't be ` +
+            `delivered until it's re-registered (${reregisterCmd})`
+        );
+        continue;
+      }
+
+      if (!ours.enabled) {
+        logger.error(
+          { tenantId: tenant.id, connectionId: target.connectionId, subscriptionId: ours.id },
+          `Dotloop subscription health check: this subscription is DISABLED (most likely auto-disabled after ` +
+            `repeated delivery failures) -- Dotloop does not re-enable it automatically. Confirm the webhook ` +
+            `endpoint is healthy, then re-register: ${reregisterCmd}`
+        );
+        continue;
+      }
+
+      logger.info({ tenantId: tenant.id, connectionId: target.connectionId, subscriptionId: ours.id }, "Dotloop subscription health check: OK");
+    } catch (err) {
+      logger.error({ err, tenantId: tenant.id, connectionId: target.connectionId }, "Dotloop subscription health check failed to run for this connection");
     }
-
-    if (!ours.enabled) {
-      logger.error(
-        { tenantId: tenant.id, subscriptionId: ours.id },
-        `Dotloop subscription health check: this tenant's subscription is DISABLED (most likely auto-disabled ` +
-          `after repeated delivery failures) -- Dotloop does not re-enable it automatically. Confirm the webhook ` +
-          `endpoint is healthy, then re-register: npm run register:dotloop-subscriptions -- --tenantId=${tenant.id}`
-      );
-      return;
-    }
-
-    logger.info({ tenantId: tenant.id, subscriptionId: ours.id }, "Dotloop subscription health check: OK");
-  } catch (err) {
-    logger.error({ err, tenantId: tenant.id }, "Dotloop subscription health check failed to run for this tenant");
   }
 }
 

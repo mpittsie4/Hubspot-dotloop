@@ -67,10 +67,10 @@ export function queueDealFromHubSpot(tenant: TenantRow, hubspotDealId: string) {
 // shared key to lock on. Loops/deals also have no dedup-by-lookup fallback
 // the way contacts do (findContactByEmail), so that scenario isn't fully
 // closed. Worth revisiting if it's ever observed in practice.
-export function queueLoopFromDotloop(tenant: TenantRow, profileId: string, loopId: string) {
+export function queueLoopFromDotloop(tenant: TenantRow, dotloopAccountId: string, profileId: string, loopId: string) {
   const label = `loop:dotloop:${tenant.id}:${loopId}`;
   return runSafely(tenant.id, {
     label,
-    run: () => withKeyedLock(label, () => syncLoopFromDotloop(tenant, profileId, loopId)),
+    run: () => withKeyedLock(label, () => syncLoopFromDotloop(tenant, dotloopAccountId, profileId, loopId)),
   });
 }

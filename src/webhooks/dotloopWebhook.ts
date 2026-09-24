@@ -2,9 +2,9 @@ import { Router } from "express";
 import { config } from "../config";
 import { verifyDotloopSignature } from "../utils/crypto";
 import { queueContactFromDotloop, queueLoopFromDotloop } from "../sync/syncEngine";
-import { getTenantByDotloopProfileId } from "../db/tenantRepo";
 import { findMappingByDotloopId, repointMappingDotloopId } from "../db/mappingRepo";
-import { EntityType } from "../db/types";
+import { EntityType, TenantRow } from "../db/types";
+import { resolveTenantAndAccountForProfile } from "../sync/dotloopRouting";
 import { logger } from "../utils/logger";
 
 interface DotloopWebhookEvent {
@@ -48,34 +48,45 @@ dotloopWebhookRouter.post("/", (req, res) => {
 
 /**
  * Dotloop events carry a profileId, not an accountId (an account can have
- * more than one profile), so tenant resolution looks up by cached profile
- * id -- see db/tenantRepo.ts's getTenantByDotloopProfileId and
- * sync/reconcile.ts's backfillDotloopProfileIds for tenants connected
- * before that column existed.
+ * more than one profile), so tenant+account resolution looks up by cached
+ * profile id -- checking the tenant's own single connection first, then
+ * (brokerage mode) each agent's own connection -- see
+ * sync/dotloopRouting.ts's resolveTenantAndAccountForProfile() and
+ * sync/reconcile.ts's backfill helpers for tenants/connections connected
+ * before their profile id was cached.
+ *
+ * Deliberately loop-scoped: CONTACT_CREATED/UPDATED still resolves the
+ * tenant the same way but syncs via the tenant's own dotloop_account_id
+ * only (queueContactFromDotloop), since standalone Contact sync isn't
+ * routed per-agent -- see dotloopRouting.ts's doc comment for why. In a
+ * pure brokerage tenant (no tenant-level account at all), a contact event
+ * just gets skipped with the existing "tenant not fully connected" log --
+ * a known, deliberate gap, not a bug.
  */
 async function handleEvent(event: DotloopWebhookEvent) {
-  const tenant = await getTenantByDotloopProfileId(event.profileId);
-  if (!tenant) {
+  const resolved = await resolveTenantAndAccountForProfile(event.profileId);
+  if (!resolved) {
     logger.warn({ profileId: event.profileId }, "Ignoring Dotloop webhook event for an unrecognized/unlinked profile");
     return;
   }
+  const { tenant, dotloopAccountId } = resolved;
 
   switch (event.eventType) {
     case "LOOP_CREATED":
     case "LOOP_UPDATED":
-      void queueLoopFromDotloop(tenant, event.profileId, event.event.id);
+      void queueLoopFromDotloop(tenant, dotloopAccountId, event.profileId, event.event.id);
       break;
     case "LOOP_PARTICIPANT_CREATED":
     case "LOOP_PARTICIPANT_UPDATED":
       // Participants roll up into the loop's synced state; re-sync the loop.
-      void queueLoopFromDotloop(tenant, event.profileId, event.event.id);
+      void queueLoopFromDotloop(tenant, dotloopAccountId, event.profileId, event.event.id);
       break;
     case "CONTACT_CREATED":
     case "CONTACT_UPDATED":
       void queueContactFromDotloop(tenant, event.event.id);
       break;
     case "LOOP_MERGED":
-      void handleLoopMerged(tenant, event.profileId, event.event.fromId, event.event.toId);
+      void handleLoopMerged(tenant, dotloopAccountId, event.profileId, event.event.fromId, event.event.toId);
       break;
     default:
       logger.debug({ eventType: event.eventType }, "Ignoring unhandled Dotloop event type");
@@ -88,7 +99,7 @@ async function handleEvent(event: DotloopWebhookEvent) {
  * a stale id we already resolved, so that redirect never comes into play
  * here. The real risk is on our side of the merge: LOOP_MERGED delivers
  * `fromId` (the id that stops resolving) and `toId` (the surviving id), and
- * without this, syncLoopFromDotloop(tenant, profileId, toId) would look up
+ * without this, syncLoopFromDotloop(tenant, dotloopAccountId, profileId, toId) would look up
  * a mapping keyed on toId, find none (the existing row is still keyed on
  * fromId), and create a brand-new duplicate HubSpot deal for a transaction
  * that already had one.
@@ -103,7 +114,13 @@ async function handleEvent(event: DotloopWebhookEvent) {
  * against the surviving loop's existing mapping (a safe no-op for the
  * fromId side, not a data-destroying one).
  */
-export async function handleLoopMerged(tenant: Awaited<ReturnType<typeof getTenantByDotloopProfileId>>, profileId: string, fromId: string | undefined, toId: string | undefined) {
+export async function handleLoopMerged(
+  tenant: TenantRow | null,
+  dotloopAccountId: string,
+  profileId: string,
+  fromId: string | undefined,
+  toId: string | undefined
+) {
   if (!tenant || !toId) {
     logger.warn({ tenantId: tenant?.id, fromId, toId }, "LOOP_MERGED event missing toId (or tenant); nothing to sync");
     return;
@@ -140,5 +157,5 @@ export async function handleLoopMerged(tenant: Awaited<ReturnType<typeof getTena
     }
   }
 
-  void queueLoopFromDotloop(tenant, profileId, toId);
+  void queueLoopFromDotloop(tenant, dotloopAccountId, profileId, toId);
 }

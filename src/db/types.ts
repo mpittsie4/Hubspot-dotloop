@@ -111,6 +111,47 @@ export interface ContactRoleMapping {
   dotloopRole: string; // Dotloop participant role enum value, e.g. "BUYER", "LOAN_OFFICER"
 }
 
+export const DotloopConnectionStatus = {
+  PENDING: "PENDING",
+  ACTIVE: "ACTIVE",
+} as const;
+export type DotloopConnectionStatus = (typeof DotloopConnectionStatus)[keyof typeof DotloopConnectionStatus];
+
+/**
+ * One HubSpot user's (agent's) own Dotloop OAuth connection, for a
+ * brokerage tenant where many agents share one HubSpot portal but each has
+ * their own separate Dotloop account. Added 2026-09-24, per Mason: "what if
+ * i sign a brokerage where many agents are using the same hubspot but use
+ * their own dotloop accounts."
+ *
+ * A tenant with zero rows here is a plain single-account tenant (the
+ * existing model, e.g. tenant_default) -- every deal syncs into
+ * tenants.dotloop_account_id/dotloop_profile_id, unchanged. A tenant with
+ * at least one row here is in "brokerage mode": sync/dotloopRouting.ts
+ * routes each deal to whichever agent's connection matches its HubSpot
+ * Owner property, and (per Mason's explicit decision, 2026-09-24) a deal
+ * owned by an agent who hasn't connected their own Dotloop account yet is
+ * skipped and logged rather than falling back to any other account.
+ *
+ * Deliberately deal/loop-scoped for now: standalone HubSpot Contact <->
+ * Dotloop Contact sync (sync/contactSync.ts) is NOT routed per-agent --
+ * see the doc comment on sync/dotloopRouting.ts for why.
+ *
+ * Set up via the per-agent connect link (POST /auth/admin/tenants/:id/agents
+ * mints it, /auth/dotloop/start?tenantId=...&hubspotOwnerId=... is what the
+ * agent actually visits) rather than the tenant-wide /auth/dotloop/start.
+ */
+export interface DotloopConnectionRow {
+  id: string;
+  tenantId: string;
+  hubspotOwnerId: string;
+  dotloopAccountId: string | null;
+  dotloopProfileId: string | null;
+  status: DotloopConnectionStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface TenantRow {
   id: string;
   name: string | null;

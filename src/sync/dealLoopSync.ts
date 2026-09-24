@@ -19,8 +19,11 @@ import { hashSyncPayload } from "../utils/crypto";
 import { logger } from "../utils/logger";
 import { syncLoopDocuments } from "./documentSync";
 import { syncParticipantsForDeal } from "./participantSync";
+import { resolveDotloopTargetForDeal } from "./dotloopRouting";
 
-const HUBSPOT_DEAL_PROPERTIES = ["dealname", "amount", "dealstage", "closedate", "pipeline"];
+// hubspot_owner_id is only used for routing (resolveDotloopTargetForDeal,
+// brokerage-mode tenants) -- not part of the synced canonical deal fields.
+const HUBSPOT_DEAL_PROPERTIES = ["dealname", "amount", "dealstage", "closedate", "pipeline", "hubspot_owner_id"];
 
 async function logSync(
   tenantId: string,
@@ -48,18 +51,30 @@ async function pushCanonicalToDotloop(
 
 /** Syncs a single HubSpot deal -> its Dotloop loop counterpart, for one tenant. */
 export async function syncDealFromHubSpot(tenant: TenantRow, hubspotDealId: string) {
-  if (!tenant.hubspotPortalId || !tenant.dotloopAccountId) {
+  if (!tenant.hubspotPortalId) {
     logger.warn({ tenantId: tenant.id }, "Tenant is not fully connected yet; skipping deal sync");
     return;
   }
   const hubspot = await HubSpotClient.create(tenant.hubspotPortalId);
-  const dotloop = await DotloopClient.create(tenant.dotloopAccountId);
 
   const source = await hubspot.getDeal(hubspotDealId, HUBSPOT_DEAL_PROPERTIES);
   if (!source) {
     logger.warn({ tenantId: tenant.id, hubspotDealId }, "HubSpot deal not found (possibly deleted); skipping");
     return;
   }
+
+  // Which Dotloop account this deal syncs into: the tenant's own single
+  // account, or (brokerage mode) whichever agent owns this deal in HubSpot
+  // -- see dotloopRouting.ts. A deal whose owner hasn't connected their own
+  // Dotloop account yet is skipped, not attributed to some other account.
+  const target = await resolveDotloopTargetForDeal(tenant, source.properties.hubspot_owner_id ?? null);
+  if (!target.ok) {
+    logger.warn({ tenantId: tenant.id, hubspotDealId, reason: target.reason }, "Skipping deal sync: no Dotloop connection to sync into");
+    await logSync(tenant.id, "HUBSPOT_TO_DOTLOOP", hubspotDealId, null, "SKIPPED", target.reason);
+    return;
+  }
+  const dotloop = await DotloopClient.create(target.dotloopAccountId);
+
   const canonical = fromHubSpotDeal(tenant.pipelinesConfig, source.properties);
   const hash = hashSyncPayload(canonical as any);
 
@@ -72,11 +87,11 @@ export async function syncDealFromHubSpot(tenant: TenantRow, hubspotDealId: stri
       // this deal's own core fields, not its contact associations, so an
       // association-only change (adding a Buyer, say) still needs a
       // participant sync pass even when nothing else on the deal changed.
-      const profileId = mapping.dotloopProfileId ?? (await dotloop.resolveProfileId());
+      const profileId = mapping.dotloopProfileId ?? target.dotloopProfileId ?? (await dotloop.resolveProfileId());
       await syncParticipantsSafely(tenant, hubspot, dotloop, hubspotDealId, profileId, mapping.dotloopId);
       return;
     }
-    const profileId = mapping.dotloopProfileId ?? (await dotloop.resolveProfileId());
+    const profileId = mapping.dotloopProfileId ?? target.dotloopProfileId ?? (await dotloop.resolveProfileId());
     await pushCanonicalToDotloop(dotloop, profileId, mapping.dotloopId, canonical);
     await hubspot.updateDeal(hubspotDealId, dotloopSyncStatusProperties({ id: mapping.dotloopId }));
     await updateMapping(mapping.id, { lastSyncedHash: hash, lastSyncedAt: new Date(), lastSyncOrigin: SyncOrigin.HUBSPOT });
@@ -101,7 +116,7 @@ export async function syncDealFromHubSpot(tenant: TenantRow, hubspotDealId: stri
       "Deal's pipeline isn't in this tenant's pipelinesConfig; falling back to DEFAULT_TRANSACTION_TYPE for the new loop"
     );
   }
-  const profileId = await dotloop.resolveProfileId();
+  const profileId = target.dotloopProfileId ?? (await dotloop.resolveProfileId());
   const loop = await dotloop.createLoop(profileId, {
     name: canonical.name || `HubSpot Deal ${hubspotDealId}`,
     transactionType,
@@ -124,14 +139,22 @@ export async function syncDealFromHubSpot(tenant: TenantRow, hubspotDealId: stri
   await syncParticipantsSafely(tenant, hubspot, dotloop, hubspotDealId, profileId, String(loop.id));
 }
 
-/** Syncs a single Dotloop loop -> its HubSpot deal counterpart, for one tenant. */
-export async function syncLoopFromDotloop(tenant: TenantRow, profileId: string, loopId: string) {
-  if (!tenant.hubspotPortalId || !tenant.dotloopAccountId) {
+/**
+ * Syncs a single Dotloop loop -> its HubSpot deal counterpart, for one
+ * tenant. `dotloopAccountId` is the specific Dotloop account this loop
+ * lives under -- the tenant's own single account, or (brokerage mode) the
+ * one agent connection that owns this loop's profile, already resolved by
+ * the caller (see webhooks/dotloopWebhook.ts, sync/reconcile.ts, and
+ * dotloopRouting.ts) since a webhook event's profileId only identifies the
+ * account unambiguously once, not on every downstream call.
+ */
+export async function syncLoopFromDotloop(tenant: TenantRow, dotloopAccountId: string, profileId: string, loopId: string) {
+  if (!tenant.hubspotPortalId) {
     logger.warn({ tenantId: tenant.id }, "Tenant is not fully connected yet; skipping loop sync");
     return;
   }
   const hubspot = await HubSpotClient.create(tenant.hubspotPortalId);
-  const dotloop = await DotloopClient.create(tenant.dotloopAccountId);
+  const dotloop = await DotloopClient.create(dotloopAccountId);
 
   const summary = await dotloop.getLoop(profileId, loopId);
   if (!summary) {

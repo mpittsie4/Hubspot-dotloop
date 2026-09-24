@@ -60,10 +60,10 @@ describe("handleLoopMerged", () => {
       dotloopId === "loop_from" ? oldMapping : null
     );
 
-    await handleLoopMerged(tenant, "profile_1", "loop_from", "loop_to");
+    await handleLoopMerged(tenant, "acct_1", "profile_1", "loop_from", "loop_to");
 
     expect(repointMappingDotloopId).toHaveBeenCalledWith("mapping_old", "loop_to");
-    expect(queueLoopFromDotloop).toHaveBeenCalledWith(tenant, "profile_1", "loop_to");
+    expect(queueLoopFromDotloop).toHaveBeenCalledWith(tenant, "acct_1", "profile_1", "loop_to");
   });
 
   it("does not repoint, and does not throw, when both loops already have their own separate deals", async () => {
@@ -75,24 +75,24 @@ describe("handleLoopMerged", () => {
       return null;
     });
 
-    await handleLoopMerged(tenant, "profile_1", "loop_from", "loop_to");
+    await handleLoopMerged(tenant, "acct_1", "profile_1", "loop_from", "loop_to");
 
     expect(repointMappingDotloopId).not.toHaveBeenCalled();
     // Still syncs the surviving loop against its own already-correct mapping.
-    expect(queueLoopFromDotloop).toHaveBeenCalledWith(tenant, "profile_1", "loop_to");
+    expect(queueLoopFromDotloop).toHaveBeenCalledWith(tenant, "acct_1", "profile_1", "loop_to");
   });
 
   it("is a no-op repoint when the old loop id was never mapped to a deal (brand new loop merged away before it synced)", async () => {
     vi.mocked(findMappingByDotloopId).mockResolvedValue(null);
 
-    await handleLoopMerged(tenant, "profile_1", "loop_from", "loop_to");
+    await handleLoopMerged(tenant, "acct_1", "profile_1", "loop_from", "loop_to");
 
     expect(repointMappingDotloopId).not.toHaveBeenCalled();
-    expect(queueLoopFromDotloop).toHaveBeenCalledWith(tenant, "profile_1", "loop_to");
+    expect(queueLoopFromDotloop).toHaveBeenCalledWith(tenant, "acct_1", "profile_1", "loop_to");
   });
 
   it("does nothing if toId is missing from the event", async () => {
-    await handleLoopMerged(tenant, "profile_1", "loop_from", undefined);
+    await handleLoopMerged(tenant, "acct_1", "profile_1", "loop_from", undefined);
 
     expect(findMappingByDotloopId).not.toHaveBeenCalled();
     expect(queueLoopFromDotloop).not.toHaveBeenCalled();
@@ -101,8 +101,8 @@ describe("handleLoopMerged", () => {
   it("still syncs the surviving loop even if the mapping lookup throws", async () => {
     vi.mocked(findMappingByDotloopId).mockRejectedValue(new Error("db exploded"));
 
-    await handleLoopMerged(tenant, "profile_1", "loop_from", "loop_to");
+    await handleLoopMerged(tenant, "acct_1", "profile_1", "loop_from", "loop_to");
 
-    expect(queueLoopFromDotloop).toHaveBeenCalledWith(tenant, "profile_1", "loop_to");
+    expect(queueLoopFromDotloop).toHaveBeenCalledWith(tenant, "acct_1", "profile_1", "loop_to");
   });
 });

@@ -8,7 +8,7 @@ import { healthRouter } from "./routes/healthRoutes";
 import { hubspotWebhookRouter } from "./webhooks/hubspotWebhook";
 import { hubspotProxyRouter } from "./routes/hubspotProxyRoutes";
 import { dotloopWebhookRouter } from "./webhooks/dotloopWebhook";
-import { backfillDotloopProfileIds, scheduleReconciliation } from "./sync/reconcile";
+import { backfillConnectionProfileIds, backfillDotloopProfileIds, scheduleReconciliation } from "./sync/reconcile";
 import { runSubscriptionHealthCheck, scheduleSubscriptionHealthCheck } from "./sync/subscriptionHealthCheck";
 import { migrate } from "./db/migrate";
 
@@ -53,6 +53,7 @@ async function main() {
   // its Dotloop webhooks are reachable immediately rather than waiting for
   // the next reconciliation pass -- see sync/reconcile.ts.
   await backfillDotloopProfileIds();
+  await backfillConnectionProfileIds();
 
   app.listen(config.port, () => {
     logger.info({ port: config.port }, "hubspot-dotloop-connector listening");
