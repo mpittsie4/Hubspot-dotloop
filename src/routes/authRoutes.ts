@@ -4,7 +4,14 @@ import { buildHubSpotAuthorizeUrl, handleHubSpotCallback } from "../auth/hubspot
 import { buildDotloopAuthorizeUrl, handleDotloopCallback } from "../auth/dotloopOAuth";
 import { HubSpotClient } from "../clients/hubspotClient";
 import { DotloopAccount, DotloopClient, DotloopProfile } from "../clients/dotloopClient";
-import { createTenant, getTenantById, setDotloopAccountId, setDotloopProfileId, setHubspotPortalId } from "../db/tenantRepo";
+import {
+  createTenant,
+  getTenantByHubspotPortalId,
+  getTenantById,
+  setDotloopAccountId,
+  setDotloopProfileId,
+  setHubspotPortalId,
+} from "../db/tenantRepo";
 import {
   createPendingConnection,
   listConnectionsForTenant,
@@ -27,11 +34,16 @@ const DEFAULT_TENANT_ID = "tenant_default";
 // Each nonce carries the tenant it belongs to (and, for a per-agent Dotloop
 // connection, which HubSpot owner it's for -- see the "brokerage mode"
 // section below), so the two independent OAuth flows -- HubSpot connect and
-// Dotloop connect, normally two separate clicks in this manual-onboarding
-// admin flow -- link back to the same tenant row instead of just landing
-// wherever getSoleToken() used to assume they both went.
+// Dotloop connect -- link back to the same tenant row.
+//
+// tenantId is optional as of the one-click-install change (2026-09-24):
+// omitting it on /hubspot/start means "no tenant exists yet, create one on
+// callback" -- this is what makes a single public install link work with no
+// admin API call from Mason first. It's still required (and validated
+// up-front) for /dotloop/start, since a Dotloop connection always attaches
+// to an already-HubSpot-connected tenant.
 interface PendingState {
-  tenantId: string;
+  tenantId?: string;
   hubspotOwnerId?: string;
 }
 const pendingStates = new Map<string, PendingState>();
@@ -48,11 +60,24 @@ function consumeState(nonce: string): PendingState | undefined {
   return state;
 }
 
+// One-click install: https://connect.theatlashub.io/auth/hubspot/start with
+// NO tenantId at all is the link a brand-new customer clicks (from the
+// HubSpot Marketplace listing, or just handed to them directly) -- no admin
+// API call from Mason first. The callback below creates their tenant row
+// itself, keyed off the HubSpot portal id it gets back from OAuth.
+//
+// A tenantId is still accepted for two cases that need one to already
+// exist: (a) Mason's own pre-existing bookmarked links / the admin-created
+// flow for a customer he's onboarding by hand, and (b) HubSpot re-running
+// this same OAuth flow on its own (e.g. a scope change forcing re-consent)
+// for an already-connected tenant.
 authRouter.get("/hubspot/start", async (req, res) => {
-  const tenantId = typeof req.query.tenantId === "string" ? req.query.tenantId : DEFAULT_TENANT_ID;
-  const tenant = await getTenantById(tenantId);
-  if (!tenant) {
-    return res.status(404).send(`Unknown tenantId "${tenantId}". Create one first via POST /auth/admin/tenants.`);
+  const tenantId = typeof req.query.tenantId === "string" ? req.query.tenantId : undefined;
+  if (tenantId) {
+    const tenant = await getTenantById(tenantId);
+    if (!tenant) {
+      return res.status(404).send(`Unknown tenantId "${tenantId}".`);
+    }
   }
   res.redirect(buildHubSpotAuthorizeUrl(buildState({ tenantId })));
 });
@@ -63,12 +88,27 @@ authRouter.get("/hubspot/callback", async (req, res) => {
   if (!parsed) {
     return res.status(400).send("Invalid or expired OAuth state.");
   }
-  const { tenantId } = parsed;
   if (typeof code !== "string") {
     return res.status(400).send("Missing authorization code.");
   }
   try {
     const { portalId, accessToken } = await handleHubSpotCallback(code);
+
+    // Resolve the tenant this install belongs to: the one named in state if
+    // any, else whichever tenant (if any) is already linked to this exact
+    // HubSpot portal (a reinstall/re-consent should never create a second,
+    // duplicate tenant row for the same portal), else a brand-new tenant --
+    // this last case is what makes the plain install link self-serve.
+    let tenant = parsed.tenantId
+      ? await getTenantById(parsed.tenantId)
+      : await getTenantByHubspotPortalId(portalId);
+    const isNewTenant = !tenant;
+    if (!tenant) {
+      tenant = await createTenant(`HubSpot portal ${portalId}`);
+    }
+    const tenantId = tenant.id;
+    const alreadyHadDotloop = Boolean(tenant.dotloopAccountId);
+
     await setHubspotPortalId(tenantId, portalId);
 
     // One-time per-install setup: make sure this portal has the dotloop_*
@@ -85,9 +125,22 @@ authRouter.get("/hubspot/callback", async (req, res) => {
       logger.error({ err: propErr, portalId, tenantId }, "Failed to auto-create dotloop_* properties for this portal");
     }
 
-    res.send(`HubSpot connected (portal ${portalId}, tenant ${tenantId}). You can close this tab.`);
+    logger.info({ portalId, tenantId, isNewTenant }, "HubSpot connected");
+
+    // The whole point of the one-click flow: don't stop and make them wait
+    // for a second link from Mason. If Dotloop isn't connected yet, walk
+    // straight into that OAuth grant next -- from the customer's side this
+    // is just two consent screens back to back. Skip this if Dotloop was
+    // already connected (a reconnect/re-consent of an already-active
+    // tenant, e.g. picking up a new scope) -- don't force them through
+    // Dotloop's OAuth again for no reason.
+    if (!alreadyHadDotloop) {
+      return res.redirect(`/auth/dotloop/start?tenantId=${tenantId}`);
+    }
+
+    res.send(`HubSpot reconnected (portal ${portalId}, tenant ${tenantId}). You can close this tab.`);
   } catch (err) {
-    logger.error({ err, tenantId }, "HubSpot OAuth callback failed");
+    logger.error({ err }, "HubSpot OAuth callback failed");
     res.status(500).send("Failed to complete HubSpot connection. Check server logs.");
   }
 });
@@ -116,7 +169,14 @@ authRouter.get("/dotloop/callback", async (req, res) => {
   if (!parsed) {
     return res.status(400).send("Invalid or expired OAuth state.");
   }
-  const { tenantId, hubspotOwnerId } = parsed;
+  // /dotloop/start always resolves a concrete tenantId before building this
+  // state (falling back to DEFAULT_TENANT_ID), unlike /hubspot/start, which
+  // can now leave it unset for a brand-new one-click install. So this is
+  // always a real tenant id in practice -- the fallback below only guards
+  // against a state nonce built somewhere PendingState's type doesn't
+  // already prevent.
+  const tenantId = parsed.tenantId ?? DEFAULT_TENANT_ID;
+  const { hubspotOwnerId } = parsed;
   if (typeof code !== "string") {
     return res.status(400).send("Missing authorization code.");
   }
@@ -214,13 +274,17 @@ function renderDotloopConnectedPage(opts: {
 }
 
 // ---- Minimal admin endpoints for onboarding ------------------------------
-// No self-serve onboarding wizard yet (see the "no self-serve wizard yet"
-// decision in the public-distribution roadmap doc) -- Mason creates a
-// tenant row here, sends that customer the two connect URLs it returns to
-// complete both OAuth grants, then edits that tenant's pipelines_config
-// directly in the DB for their real HubSpot pipeline/stage ids. Protected
-// by a shared secret (ADMIN_API_KEY) rather than left open, since it
-// creates real, billable-later tenant rows.
+// As of the one-click-install change (2026-09-24), a new customer no longer
+// needs this at all -- they can just be sent /auth/hubspot/start directly
+// (no tenantId) and everything from tenant creation through the Dotloop
+// connect redirect happens on its own. This endpoint remains for cases
+// where Mason wants to pre-create a tenant by hand before sending a link
+// (e.g. to control its name up front, or for support purposes), and its
+// returned connectHubspotUrl/connectDotloopUrl still work exactly as
+// before. Pipeline/stage mapping (tenants.pipelines_config) still has no
+// self-serve UI -- that's a separate, not-yet-fixed gap (see the runbook).
+// Protected by a shared secret (ADMIN_API_KEY) since it creates real,
+// billable-later tenant rows.
 authRouter.post("/admin/tenants", async (req, res) => {
   if (!config.adminApiKey || req.header("X-Admin-Key") !== config.adminApiKey) {
     return res.status(401).json({ error: "Missing or invalid X-Admin-Key header." });

@@ -32,6 +32,20 @@ export interface HubSpotCompanyProperties {
   [key: string]: string | undefined;
 }
 
+/** A HubSpot CRM Owner (a sales rep/user who can be assigned as a deal's
+ *  owner) — see hubspotProxyRoutes.ts's dotlop-status endpoint, which uses
+ *  this to resolve a deal's owner id to their email so the Deal Sync Status
+ *  card can tell whether the person currently viewing the card *is* that
+ *  owner before ever showing them a "connect your Dotloop" button (showing
+ *  it to the wrong person would let them accidentally link their own
+ *  Dotloop account under someone else's brokerage connection slot). */
+export interface HubSpotOwner {
+  id: string;
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+}
+
 /** One HubSpot association-label definition, e.g. a custom "Buyer" label
  *  between deals and contacts. `label` is null for the default/unlabeled
  *  association a pair of object types always has (e.g. deal<->company's
@@ -285,6 +299,22 @@ export class HubSpotClient {
 
   async listRecentDeals(since: Date, properties: string[]): Promise<HubSpotObject<HubSpotDealProperties>[]> {
     return this.searchByLastModified("deals", since, properties);
+  }
+
+  // ---- Owners (used by hubspotProxyRoutes.ts to resolve a deal's
+  // hubspot_owner_id to that owner's email — needs the crm.objects.owners.read
+  // scope, added alongside the brokerage self-serve-connect feature; existing
+  // installs need to re-consent once this scope is added, same as the
+  // crm.objects.companies.read rollout) -------------------------------------
+
+  async getOwner(ownerId: string): Promise<HubSpotOwner | null> {
+    try {
+      const res = await this.http.get(`/crm/v3/owners/${ownerId}`);
+      return { id: String(res.data.id), email: res.data.email, firstName: res.data.firstName, lastName: res.data.lastName };
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 404) return null;
+      throw err;
+    }
   }
 
   // ---- Companies --------------------------------------------------------

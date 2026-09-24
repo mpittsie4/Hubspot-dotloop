@@ -5,6 +5,7 @@ import { HubSpotClient } from "../clients/hubspotClient";
 import { listActiveTenants, getTenantByHubspotPortalId } from "../db/tenantRepo";
 import { TenantRow } from "../db/types";
 import { listSyncedDocumentsForDeal } from "../db/documentSyncRepo";
+import { findConnectionByOwner, hasAnyConnections } from "../db/dotloopConnectionRepo";
 import { logger } from "../utils/logger";
 
 /**
@@ -127,7 +128,65 @@ const DOTLOOP_DEAL_PROPERTIES = [
   "dotloop_loop_url",
   "dotloop_sync_status",
   "dotloop_last_synced_at",
+  "hubspot_owner_id",
 ];
+
+/**
+ * Brokerage self-serve connect: tells the Deal Sync Status card whether
+ * *this specific deal* is stuck waiting on its owner to connect their own
+ * Dotloop account (see sync/dotloopRouting.ts's skip-not-fallback
+ * behavior), and if so, whether the person currently looking at the card
+ * *is* that owner.
+ *
+ * Deliberately never returns a connectUrl to anyone but the matching owner
+ * -- resolveDotloopTargetForDeal() routes strictly by hubspot_owner_id, so
+ * if a teammate or admin viewing the same deal could click a "connect"
+ * button here, they'd silently link *their own* Dotloop account into the
+ * real owner's connection slot, which is exactly the wrong-account problem
+ * the whole account-confirmation feature exists to prevent. Only the deal
+ * card knows who's asking (via the viewerEmail it sends from
+ * context.user.email), so that gating has to happen here, not client-side.
+ *
+ * Returns null (nothing to show) for a single-account tenant, a deal with
+ * no owner, or an owner who's already ACTIVE.
+ */
+export async function resolveDealDotloopConnectionForViewer(
+  tenant: TenantRow,
+  client: HubSpotClient,
+  ownerId: string | undefined,
+  viewerEmail: string | undefined
+): Promise<{
+  status: "NOT_CONNECTED" | "PENDING";
+  ownerLabel: string;
+  isViewerTheOwner: boolean;
+  connectUrl: string | null;
+} | null> {
+  if (!ownerId) return null;
+  if (!(await hasAnyConnections(tenant.id))) return null; // not a brokerage tenant
+
+  const connection = await findConnectionByOwner(tenant.id, ownerId);
+  if (connection?.status === "ACTIVE") return null; // already connected, nothing to show
+
+  let owner: Awaited<ReturnType<HubSpotClient["getOwner"]>> = null;
+  try {
+    owner = await client.getOwner(ownerId);
+  } catch (err) {
+    logger.error({ err, ownerId }, "Failed to look up deal owner for brokerage self-serve connect prompt");
+  }
+  const ownerLabel = owner ? `${owner.firstName ?? ""} ${owner.lastName ?? ""}`.trim() || owner.email || ownerId : ownerId;
+  const isViewerTheOwner = Boolean(
+    viewerEmail && owner?.email && viewerEmail.toLowerCase() === owner.email.toLowerCase()
+  );
+
+  return {
+    status: connection?.status === "PENDING" ? "PENDING" : "NOT_CONNECTED",
+    ownerLabel,
+    isViewerTheOwner,
+    connectUrl: isViewerTheOwner
+      ? `${config.publicBaseUrl}/auth/dotloop/start?tenantId=${tenant.id}&hubspotOwnerId=${encodeURIComponent(ownerId)}`
+      : null,
+  };
+}
 
 hubspotProxyRouter.get("/deals/:dealId/dotloop-status", requireHubSpotSignature, async (req, res) => {
   const { dealId } = req.params;
@@ -159,7 +218,20 @@ hubspotProxyRouter.get("/deals/:dealId/dotloop-status", requireHubSpotSignature,
       logger.error({ err, dealId }, "Failed to fetch synced documents for card proxy; returning sync status without them");
     }
 
-    res.json({ properties: deal.properties, documents });
+    let dotloopConnection = null;
+    try {
+      const viewerEmail = typeof req.query.viewerEmail === "string" ? req.query.viewerEmail : undefined;
+      dotloopConnection = await resolveDealDotloopConnectionForViewer(
+        tenant,
+        client,
+        deal.properties.hubspot_owner_id,
+        viewerEmail
+      );
+    } catch (err) {
+      logger.error({ err, dealId }, "Failed to resolve brokerage self-serve connect status; omitting it from the response");
+    }
+
+    res.json({ properties: deal.properties, documents, dotloopConnection });
   } catch (err) {
     logger.error({ err, dealId }, "Failed to fetch dotloop sync status for card proxy");
     res.status(502).json({ error: "Failed to fetch Dotloop sync status from HubSpot." });
