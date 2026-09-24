@@ -13,7 +13,7 @@ vi.mock("../utils/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-import { resolveDealDotloopConnectionForViewer } from "./hubspotProxyRoutes";
+import { resolveDealDotloopConnectionForViewer, validatePipelineConfig } from "./hubspotProxyRoutes";
 import { findConnectionByOwner, hasAnyConnections } from "../db/dotloopConnectionRepo";
 
 function tenant(overrides: Partial<TenantRow> = {}): TenantRow {
@@ -116,5 +116,82 @@ describe("resolveDealDotloopConnectionForViewer", () => {
     expect(result?.isViewerTheOwner).toBe(false);
     expect(result?.connectUrl).toBeNull();
     expect(result?.ownerLabel).toBe("owner_1");
+  });
+});
+
+describe("validatePipelineConfig", () => {
+  function validPipeline(overrides: Record<string, unknown> = {}) {
+    return {
+      key: "buyer-pipeline",
+      pipelineId: "default",
+      transactionType: "PURCHASE_OFFER",
+      stages: [{ id: "stage_1", label: "Engaging", status: "Pre-Offer" }],
+      ...overrides,
+    };
+  }
+
+  it("accepts a well-formed pipeline mapping and passes stage fields through unchanged", () => {
+    const result = validatePipelineConfig([validPipeline()]);
+    expect(result).toEqual([
+      {
+        key: "buyer-pipeline",
+        pipelineId: "default",
+        transactionType: "PURCHASE_OFFER",
+        stages: [{ id: "stage_1", label: "Engaging", status: "Pre-Offer" }],
+      },
+    ]);
+  });
+
+  it("accepts multiple pipelines with different transaction types", () => {
+    const result = validatePipelineConfig([
+      validPipeline(),
+      validPipeline({ key: "listing-pipeline", pipelineId: "p2", transactionType: "LISTING_FOR_SALE" }),
+    ]);
+    expect(result).toHaveLength(2);
+  });
+
+  it("rejects a non-array body", () => {
+    expect(() => validatePipelineConfig({ not: "an array" })).toThrow(/expected pipelines to be an array/i);
+    expect(() => validatePipelineConfig(null)).toThrow();
+    expect(() => validatePipelineConfig("nope")).toThrow();
+  });
+
+  it("rejects an empty array -- saving nothing isn't a valid mapping", () => {
+    expect(() => validatePipelineConfig([])).toThrow(/at least one pipeline/i);
+  });
+
+  it("rejects a pipeline missing a key or pipelineId", () => {
+    expect(() => validatePipelineConfig([validPipeline({ key: "" })])).toThrow(/missing a "key"/i);
+    expect(() => validatePipelineConfig([validPipeline({ pipelineId: undefined })])).toThrow(/missing a "pipelineId"/i);
+  });
+
+  it("rejects a transactionType outside Dotloop's real enum -- e.g. a typo or a tampered request", () => {
+    expect(() => validatePipelineConfig([validPipeline({ transactionType: "NOT_A_REAL_TYPE" })])).toThrow(
+      /invalid transactionType/i
+    );
+    expect(() => validatePipelineConfig([validPipeline({ transactionType: undefined })])).toThrow(
+      /invalid transactionType/i
+    );
+  });
+
+  it("rejects a pipeline with no mapped stages", () => {
+    expect(() => validatePipelineConfig([validPipeline({ stages: [] })])).toThrow(/at least one mapped stage/i);
+    expect(() => validatePipelineConfig([validPipeline({ stages: undefined })])).toThrow(/at least one mapped stage/i);
+  });
+
+  it("rejects a stage missing an id, label, or status", () => {
+    expect(() =>
+      validatePipelineConfig([validPipeline({ stages: [{ label: "Engaging", status: "Pre-Offer" }] })])
+    ).toThrow(/missing an "id"/i);
+    expect(() =>
+      validatePipelineConfig([validPipeline({ stages: [{ id: "s1", status: "Pre-Offer" }] })])
+    ).toThrow(/missing a "label"/i);
+    expect(() =>
+      validatePipelineConfig([validPipeline({ stages: [{ id: "s1", label: "Engaging" }] })])
+    ).toThrow(/missing a "status"/i);
+  });
+
+  it("accepts REAL_ESTATE_OTHER, the catch-all transaction type", () => {
+    expect(() => validatePipelineConfig([validPipeline({ transactionType: "REAL_ESTATE_OTHER" })])).not.toThrow();
   });
 });

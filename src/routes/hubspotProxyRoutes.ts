@@ -2,8 +2,8 @@ import { NextFunction, Request, Response, Router } from "express";
 import { config } from "../config";
 import { verifyHubSpotSignature } from "../utils/crypto";
 import { HubSpotClient } from "../clients/hubspotClient";
-import { listActiveTenants, getTenantByHubspotPortalId } from "../db/tenantRepo";
-import { TenantRow } from "../db/types";
+import { listActiveTenants, getTenantByHubspotPortalId, updatePipelinesConfig } from "../db/tenantRepo";
+import { TenantRow, PipelineConfig, PipelineStage, DotloopTransactionType } from "../db/types";
 import { listSyncedDocumentsForDeal } from "../db/documentSyncRepo";
 import { findConnectionByOwner, hasAnyConnections } from "../db/dotloopConnectionRepo";
 import { logger } from "../utils/logger";
@@ -116,10 +116,131 @@ hubspotProxyRouter.get("/pipelines/deals", requireHubSpotSignature, async (req, 
     const tenant = await resolveTenantForRequest(req);
     const client = await HubSpotClient.create(tenant.hubspotPortalId ?? undefined);
     const pipelines = await client.listDealPipelines();
-    res.json(pipelines);
+    // Included alongside HubSpot's raw pipeline list so the Settings page
+    // can pre-fill its pickers from whatever mapping is already saved for
+    // this tenant, rather than starting blank every time it's reopened.
+    res.json({ ...pipelines, pipelinesConfig: tenant.pipelinesConfig });
   } catch (err) {
     logger.error({ err }, "Failed to fetch deal pipelines for settings proxy");
     res.status(502).json({ error: "Failed to fetch deal pipelines from HubSpot." });
+  }
+});
+
+const VALID_DOTLOOP_TRANSACTION_TYPES = new Set<DotloopTransactionType>([
+  "PURCHASE_OFFER",
+  "LISTING_FOR_SALE",
+  "LISTING_FOR_LEASE",
+  "LEASE_OFFER",
+  "REAL_ESTATE_OTHER",
+]);
+
+/**
+ * Validates the shape of a PipelineConfig[] payload posted from the
+ * Settings page's "Save mapping" button (StageMappingSettings.tsx)
+ * before it's persisted via tenantRepo.updatePipelinesConfig().
+ *
+ * This is the one guard between a client-side bug (or a hand-edited
+ * request) and a corrupted tenant.pipelines_config -- which would
+ * silently break every future sync for that tenant, since
+ * resolveStageForStatus/dotloopSyncStatusProperties trust this shape
+ * completely and don't validate it again at sync time. So this is
+ * deliberately strict about structure (every field present, right
+ * type, transactionType drawn from the real Dotloop enum) -- but does
+ * NOT cross-check stage ids against the tenant's actual live HubSpot
+ * pipelines, or status strings against Dotloop's per-transaction-type
+ * status vocabulary. Both of those are enforced client-side already
+ * (the Settings page only ever offers real stage ids and valid
+ * statuses via its dropdowns), and re-deriving that here would mean
+ * this route also has to fetch the tenant's live pipelines just to
+ * validate a save, doubling this endpoint's HubSpot API calls for a
+ * check the UI already guarantees.
+ */
+export function validatePipelineConfig(body: unknown): PipelineConfig[] {
+  if (!Array.isArray(body)) {
+    throw new Error("Expected pipelines to be an array.");
+  }
+  if (body.length === 0) {
+    throw new Error("Expected at least one pipeline in the mapping.");
+  }
+
+  return body.map((entry, i) => {
+    if (typeof entry !== "object" || entry === null) {
+      throw new Error(`Pipeline at index ${i} is not an object.`);
+    }
+    const { key, pipelineId, transactionType, stages } = entry as Record<string, unknown>;
+
+    if (typeof key !== "string" || key.length === 0) {
+      throw new Error(`Pipeline at index ${i} is missing a "key".`);
+    }
+    if (typeof pipelineId !== "string" || pipelineId.length === 0) {
+      throw new Error(`Pipeline "${key}" is missing a "pipelineId".`);
+    }
+    if (typeof transactionType !== "string" || !VALID_DOTLOOP_TRANSACTION_TYPES.has(transactionType as DotloopTransactionType)) {
+      throw new Error(`Pipeline "${key}" has an invalid transactionType: ${JSON.stringify(transactionType)}.`);
+    }
+    if (!Array.isArray(stages) || stages.length === 0) {
+      throw new Error(`Pipeline "${key}" needs at least one mapped stage before it can be saved.`);
+    }
+
+    const validatedStages: PipelineStage[] = stages.map((stage, j) => {
+      if (typeof stage !== "object" || stage === null) {
+        throw new Error(`Stage ${j} of pipeline "${key}" is not an object.`);
+      }
+      const { id, label, status } = stage as Record<string, unknown>;
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error(`Stage ${j} of pipeline "${key}" is missing an "id".`);
+      }
+      if (typeof label !== "string" || label.length === 0) {
+        throw new Error(`Stage "${id}" of pipeline "${key}" is missing a "label".`);
+      }
+      if (typeof status !== "string" || status.length === 0) {
+        throw new Error(`Stage "${id}" of pipeline "${key}" is missing a "status".`);
+      }
+      return { id, label, status };
+    });
+
+    return {
+      key,
+      pipelineId,
+      transactionType: transactionType as DotloopTransactionType,
+      stages: validatedStages,
+    };
+  });
+}
+
+/**
+ * Self-serve save for the Settings page's pipeline/stage mapping table.
+ * Replaces the previous "Generate" button's paste-able-code-snippet
+ * workflow, which required Mason (or Claude) to manually run
+ * updatePipelinesConfig() for every new tenant -- see the "Settings page
+ * doesn't persist per-tenant pipeline config" known gap in the onboarding
+ * runbook. A newly self-provisioned tenant (see the one-click onboarding
+ * work) can now actually finish setting itself up without that manual
+ * step.
+ */
+hubspotProxyRouter.put("/pipelines/mapping", requireHubSpotSignature, async (req, res) => {
+  let pipelines: PipelineConfig[];
+  try {
+    // hubspot.fetch()'s body option only accepts a plain object
+    // ({[key: string]: unknown}), not a top-level array or a
+    // pre-stringified JSON string -- so StageMappingSettings.tsx sends
+    // { pipelines: [...] } rather than the array directly.
+    pipelines = validatePipelineConfig((req.body as { pipelines?: unknown } | undefined)?.pipelines);
+  } catch (err) {
+    return res.status(400).json({ error: err instanceof Error ? err.message : "Invalid pipeline mapping." });
+  }
+
+  try {
+    const tenant = await resolveTenantForRequest(req);
+    const updated = await updatePipelinesConfig(tenant.id, pipelines);
+    logger.info(
+      { tenantId: tenant.id, pipelineCount: pipelines.length },
+      "Saved pipeline/stage mapping via Settings page self-serve save"
+    );
+    res.json({ pipelines: updated.pipelinesConfig });
+  } catch (err) {
+    logger.error({ err }, "Failed to save pipeline/stage mapping");
+    res.status(502).json({ error: "Failed to save pipeline mapping." });
   }
 });
 
