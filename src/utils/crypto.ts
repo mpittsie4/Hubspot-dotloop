@@ -1,6 +1,53 @@
 import crypto from "node:crypto";
 
 /**
+ * HubSpot's v3 signing scheme hashes the request URI with a handful of
+ * percent-encoded characters in the *query string* selectively decoded back
+ * to their literal form first -- it does NOT hash the raw, fully-encoded
+ * URL a framework like Express hands you via `req.originalUrl`, and it does
+ * NOT fully decode the query string either (encoded `&`/`=`/space and
+ * anything outside this list must stay encoded, since those are structural
+ * or would change the string's meaning). Confirmed against HubSpot's own
+ * "Validating requests" docs (developers.hubspot.com), 2026-09-24, after a
+ * live signature_mismatch on the Deal Sync Status card's proxy call the
+ * moment its query string first contained an "@" (the new `viewerEmail=`
+ * param added for brokerage self-serve connect) -- every prior query param
+ * here was a plain numeric id, so this gap silently never mattered until
+ * then. Table per HubSpot's docs:
+ *   %3A -> :   %2F -> /   %3F -> ?   %40 -> @   %21 -> !   %24 -> $
+ *   %27 -> '   %28 -> (   %29 -> )   %2A -> *   %2C -> ,   %3B -> ;
+ * Only the query-string portion (after the first "?") is touched; the path
+ * and the "?" delimiter itself are left alone.
+ */
+const HUBSPOT_V3_QUERY_DECODE_MAP: Record<string, string> = {
+  "%3A": ":",
+  "%2F": "/",
+  "%3F": "?",
+  "%40": "@",
+  "%21": "!",
+  "%24": "$",
+  "%27": "'",
+  "%28": "(",
+  "%29": ")",
+  "%2A": "*",
+  "%2C": ",",
+  "%3B": ";",
+};
+
+function normalizeHubSpotV3Uri(uri: string): string {
+  const queryIndex = uri.indexOf("?");
+  if (queryIndex === -1) return uri;
+
+  const base = uri.slice(0, queryIndex + 1); // keep the "?" itself untouched
+  const query = uri.slice(queryIndex + 1);
+  const normalizedQuery = query.replace(
+    /%3A|%2F|%3F|%40|%21|%24|%27|%28|%29|%2A|%2C|%3B/gi,
+    (match) => HUBSPOT_V3_QUERY_DECODE_MAP[match.toUpperCase()] ?? match
+  );
+  return base + normalizedQuery;
+}
+
+/**
  * Verifies a HubSpot webhook request signed with the v3 scheme.
  *
  * HubSpot builds: `${method}${uri}${rawBody}${timestamp}`, HMAC-SHA256s it
@@ -11,7 +58,9 @@ import crypto from "node:crypto";
  * `uri` must be the *full* URL HubSpot called (including querystring),
  * exactly as configured for your webhook target — mismatches here are the
  * most common cause of "valid" webhooks failing verification behind a
- * proxy that rewrites the path or host.
+ * proxy that rewrites the path or host. It's normalized per
+ * `normalizeHubSpotV3Uri()` above before hashing, matching what HubSpot
+ * itself hashed on its side.
  */
 export function verifyHubSpotSignature(params: {
   method: string;
@@ -29,7 +78,8 @@ export function verifyHubSpotSignature(params: {
     return { valid: false, reason: "stale_or_invalid_timestamp" };
   }
 
-  const base = `${method}${uri}${rawBody}${timestamp}`;
+  const normalizedUri = normalizeHubSpotV3Uri(uri);
+  const base = `${method}${normalizedUri}${rawBody}${timestamp}`;
   const expected = crypto.createHmac("sha256", clientSecret).update(base, "utf8").digest("base64");
 
   const ok = timingSafeEqualStrings(expected, signature);
