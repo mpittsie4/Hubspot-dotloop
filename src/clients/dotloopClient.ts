@@ -1,4 +1,4 @@
-import axios, { AxiosInstance } from "axios";
+import axios, { AxiosError, AxiosInstance } from "axios";
 import { Provider } from "../db/types";
 import { config } from "../config";
 import { getSoleToken, getToken, saveToken } from "../auth/tokenStore";
@@ -136,9 +136,11 @@ function toDotloopFilterDate(date: Date): string {
 export class DotloopClient {
   private http: AxiosInstance;
   private accountKey: string;
+  private refreshToken: string;
 
-  private constructor(accountKey: string, accessToken: string) {
+  private constructor(accountKey: string, accessToken: string, refreshToken: string) {
     this.accountKey = accountKey;
+    this.refreshToken = refreshToken;
     this.http = axios.create({
       baseURL: config.dotloop.apiBaseUrl,
       headers: { Authorization: `Bearer ${accessToken}` },
@@ -148,6 +150,65 @@ export class DotloopClient {
     // sync attempt outright. See claude/pre-launch-improvement-research.md
     // item 2 and utils/httpRetry.ts.
     installRetryOn429(this.http, { label: "dotloop" });
+    this.installReactiveTokenRefresh();
+  }
+
+  /**
+   * Reactive safety net alongside create()'s proactive refresh, added
+   * 2026-09-24 after live sync broke for tenant_default: Dotloop rejected a
+   * stored access token as "Access token expired" / "Invalid access token"
+   * a full ~1.5+ hours before the expires_at our own bookkeeping computed
+   * from its own `expires_in` response -- so create()'s "refresh if within
+   * 5 minutes of our recorded expiry" check never fired, and every real
+   * call (subscription health check, loop reconciliation, a brand-new
+   * deal's first sync) kept failing with a live 401 no proactive check
+   * would have caught, since Dotloop's actual token lifetime evidently
+   * doesn't reliably match what it reports at issuance. Confirmed via
+   * scripts/diagnoseDotloopToken.ts that the stored refresh_token itself
+   * was still perfectly valid the whole time -- only the proactive
+   * expiry-based trigger was the gap.
+   *
+   * This interceptor catches Dotloop's own `error: "invalid_token"` 401 on
+   * any call through this instance, forces an immediate refresh (ignoring
+   * our own expiry tracking entirely), persists it, and retries the
+   * failed request exactly once with the new token -- so a sync call
+   * transparently self-heals instead of failing outright whenever Dotloop
+   * and our bookkeeping disagree about whether a token is still good.
+   */
+  private installReactiveTokenRefresh(): void {
+    this.http.interceptors.response.use(undefined, async (error: AxiosError) => {
+      const requestConfig = error.config as (typeof error.config & { __dotloopAuthRetried?: boolean }) | undefined;
+      const isInvalidToken =
+        error.response?.status === 401 && (error.response?.data as any)?.error === "invalid_token";
+
+      if (!requestConfig || !isInvalidToken || requestConfig.__dotloopAuthRetried) {
+        throw error;
+      }
+      requestConfig.__dotloopAuthRetried = true;
+
+      logger.warn(
+        { accountId: this.accountKey, url: requestConfig.url },
+        "Dotloop rejected our access token as invalid despite our own expiry tracking saying it still had time left; forcing an immediate refresh and retrying once"
+      );
+
+      const refreshed = await refreshDotloopToken(this.refreshToken);
+      await saveToken(Provider.DOTLOOP, this.accountKey, {
+        accessToken: refreshed.access_token,
+        refreshToken: refreshed.refresh_token,
+        expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
+      });
+      this.refreshToken = refreshed.refresh_token;
+      this.http.defaults.headers.common["Authorization"] = `Bearer ${refreshed.access_token}`;
+      requestConfig.headers = requestConfig.headers ?? {};
+      (requestConfig.headers as any).Authorization = `Bearer ${refreshed.access_token}`;
+
+      logger.info(
+        { accountId: this.accountKey },
+        "Reactively refreshed Dotloop access token after a live invalid_token rejection; retrying original request"
+      );
+
+      return this.http.request(requestConfig);
+    });
   }
 
   static async create(accountKey?: string): Promise<DotloopClient> {
@@ -158,6 +219,7 @@ export class DotloopClient {
     const needsRefresh = stored.expiresAt.getTime() - Date.now() < 5 * 60 * 1000;
 
     let accessToken = stored.accessToken;
+    let refreshToken = stored.refreshToken;
     if (needsRefresh) {
       const refreshed = await refreshDotloopToken(stored.refreshToken);
       await saveToken(Provider.DOTLOOP, stored.accountKey, {
@@ -166,10 +228,11 @@ export class DotloopClient {
         expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
       });
       accessToken = refreshed.access_token;
+      refreshToken = refreshed.refresh_token;
       logger.info({ accountId: stored.accountKey }, "Refreshed Dotloop access token");
     }
 
-    return new DotloopClient(stored.accountKey, accessToken);
+    return new DotloopClient(stored.accountKey, accessToken, refreshToken);
   }
 
   /**
